@@ -2,7 +2,7 @@
 
 PDF tools for Claude. One set of tool definitions is exposed two ways:
 
-- **MCP server**: connect Claude Desktop, Claude Code or any MCP client.
+- **MCP server**: connect Claude Desktop, Claude Code or any MCP client. It runs locally over stdio, or online over HTTPS (see [Deploy online](#deploy-online-oracle-cloud)).
 - **Claude API agent**: embed in your app's backend. It uses the Anthropic SDK tool runner, and your code approves each write.
 
 ## Tools
@@ -14,6 +14,11 @@ PDF tools for Claude. One set of tool definitions is exposed two ways:
 | `pdf_info` | read | Page count, page size, file size and metadata |
 | `pdf_view` | read | Hand the PDF itself to Claude so it sees layout, tables and scanned pages |
 | `pdf_merge` | write | Combine PDFs in order into a new file |
+| `pdf_import_url` | write | Download a PDF from a public URL into the workspace (max 32 MB). It won't fetch from private or internal addresses |
+| `files_list` | read | List the files in the workspace |
+| `file_link` | read | Get a time-limited download link for a file (online only) |
+
+When the server runs online, `pdf_create`, `pdf_merge` and `pdf_import_url` include a download link in their result.
 
 All paths are relative to a **workspace** directory (`CLAUDE_TOOLS_WORKSPACE`, default `./workspace`). Paths that escape it are rejected. Write tools never replace an existing file unless `overwrite: true` is passed.
 
@@ -73,6 +78,49 @@ reply(messageText(turn.message));
 ```
 
 The agent uses `claude-opus-5` with adaptive thinking (override with the `model` option or `CLAUDE_MODEL` for the CLI). If the model declines a request, the API automatically retries it on a fallback model (`fallbacks: "default"`).
+
+## Deploy online (Oracle Cloud)
+
+Online, the server runs in Docker behind [Caddy](https://caddyserver.com), which gets a free HTTPS certificate automatically. You don't need a domain: `<your-ip>.sslip.io` resolves to your VM's IP.
+
+1. **Open ports 80 and 443 in Oracle Cloud.** Go to Networking → Virtual Cloud Networks → your VCN → Security Lists → Default. Add two ingress rules with source `0.0.0.0/0`, protocol TCP, and destination ports `80` and `443`.
+2. **On the VM:**
+   ```bash
+   git clone https://github.com/16navigabraham/Abrahamnavig-claude-tools.git
+   cd Abrahamnavig-claude-tools
+   bash deploy/setup-oracle.sh               # or: bash deploy/setup-oracle.sh tools.yourdomain.com
+   ```
+   The script installs Docker and opens ports 80/443 in the VM's own firewall (Oracle's Ubuntu images block them by default). It also writes `.env` with a random `MCP_AUTH_TOKEN`, starts everything and prints your URLs.
+3. **Check it:** `https://<DOMAIN>/health` should return `{"ok":true}`.
+
+If you use your own domain, first point an `A` record at the VM's public IP.
+
+### Your URLs
+
+| What | URL |
+|---|---|
+| MCP endpoint (header auth) | `https://<DOMAIN>/mcp` with `Authorization: Bearer <MCP_AUTH_TOKEN>` |
+| MCP endpoint (for claude.ai) | `https://<DOMAIN>/mcp/<MCP_AUTH_TOKEN>` |
+| Health check | `https://<DOMAIN>/health` |
+
+**Claude.ai / Claude app:** go to Settings → Connectors → Add custom connector, and paste the `/mcp/<token>` URL. Claude.ai can't send a custom auth header, so the token goes in the URL. Treat that URL like a password.
+
+**Claude Code:**
+```bash
+claude mcp add --transport http claude-tools https://<DOMAIN>/mcp --header "Authorization: Bearer <MCP_AUTH_TOKEN>"
+```
+
+### Operating it
+
+```bash
+docker compose logs -f app                      # logs
+git pull && docker compose up -d --build        # update
+docker compose down                             # stop (files are kept in the "workspace" volume)
+```
+
+- Everyone with the token shares one workspace. For per-user files, give each user their own token and workspace, or add OAuth.
+- The endpoint is rate-limited to 120 requests per minute per IP.
+- Download links expire after `FILE_LINK_TTL_SECONDS` (default 24 hours). Changing `MCP_AUTH_TOKEN` invalidates all existing links.
 
 ## Adding tools
 

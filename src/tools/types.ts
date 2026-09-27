@@ -8,6 +8,8 @@ export type ToolContent =
 export interface ToolContext {
   /** Absolute directory every file path is resolved against. Tools never touch files outside it. */
   workspace: string;
+  /** When the tools are served online, returns a time-limited download URL for a workspace file. */
+  fileUrl?: (relPath: string) => string;
 }
 
 /**

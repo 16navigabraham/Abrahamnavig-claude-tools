@@ -25,7 +25,16 @@ describe("MCP server", () => {
   it("lists tools with read-only hints", async () => {
     const { tools } = await client.listTools();
     const byName = Object.fromEntries(tools.map((t) => [t.name, t]));
-    expect(Object.keys(byName).sort()).toEqual(["pdf_create", "pdf_info", "pdf_merge", "pdf_read", "pdf_view"]);
+    expect(Object.keys(byName).sort()).toEqual([
+      "file_link",
+      "files_list",
+      "pdf_create",
+      "pdf_import_url",
+      "pdf_info",
+      "pdf_merge",
+      "pdf_read",
+      "pdf_view",
+    ]);
     expect(byName.pdf_read.annotations?.readOnlyHint).toBe(true);
     expect(byName.pdf_create.annotations?.readOnlyHint).toBe(false);
     expect(byName.pdf_create.inputSchema.properties).toHaveProperty("content");

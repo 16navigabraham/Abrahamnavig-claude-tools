@@ -38,6 +38,11 @@ describe("MCP server", () => {
     expect(byName.pdf_read.annotations?.readOnlyHint).toBe(true);
     expect(byName.pdf_create.annotations?.readOnlyHint).toBe(false);
     expect(byName.pdf_create.inputSchema.properties).toHaveProperty("content");
+    // Write tools can overwrite an existing file (overwrite: true) — clients that
+    // gate on destructiveHint need to see that, not a blanket "non-destructive".
+    expect(byName.pdf_create.annotations?.destructiveHint).toBe(true);
+    expect(byName.pdf_merge.annotations?.destructiveHint).toBe(true);
+    expect(byName.pdf_read.annotations?.destructiveHint).toBe(false);
   });
 
   it("creates, reads and views a PDF", async () => {
@@ -48,9 +53,21 @@ describe("MCP server", () => {
     expect(JSON.stringify(read.content)).toContain("Hi MCP");
 
     const view = (await client.callTool({ name: "pdf_view", arguments: { path: "doc.pdf" } })) as {
-      content: Array<{ type: string; resource?: { mimeType?: string } }>;
+      content: Array<{ type: string; resource?: { mimeType?: string; uri?: string } }>;
     };
     expect(view.content[0]).toMatchObject({ type: "resource", resource: { mimeType: "application/pdf" } });
+    expect(view.content[0].resource?.uri).toBe("file:///doc.pdf");
+  });
+
+  it("URL-encodes path segments in resource URIs", async () => {
+    await client.callTool({ name: "pdf_create", arguments: { path: "a folder/my #1 report.pdf", content: "x" } });
+    const view = (await client.callTool({
+      name: "pdf_view",
+      arguments: { path: "a folder/my #1 report.pdf" },
+    })) as { content: Array<{ resource?: { uri?: string } }> };
+    // Each segment encoded, '/' kept as the separator, and the whole thing parses as a valid URL.
+    expect(view.content[0].resource?.uri).toBe("file:///a%20folder/my%20%231%20report.pdf");
+    expect(() => new URL(view.content[0].resource!.uri!)).not.toThrow();
   });
 
   it("returns tool errors as isError results", async () => {

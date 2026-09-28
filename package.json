@@ -42,6 +42,6 @@
     "claude-tools-mcp": "dist/mcp/main.js"
   },
   "engines": {
-    "node": ">=20"
+    "node": ">=22.12"
   }
 }

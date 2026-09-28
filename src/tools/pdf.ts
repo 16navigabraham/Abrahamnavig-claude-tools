@@ -2,6 +2,7 @@ import { PDFDocument, StandardFonts, rgb, type PDFFont, type PDFPage } from "pdf
 import { extractText, getDocumentProxy, getMeta } from "unpdf";
 import { z } from "zod";
 import { defineTool, ToolError } from "./types.js";
+import { linkLine } from "./files.js";
 import { readWorkspaceFile, writeWorkspaceFile } from "./workspace.js";
 
 // Claude's document input accepts PDFs up to 32 MB per request.
@@ -153,7 +154,10 @@ export const pdfCreate = defineTool({
     });
     const saved = await writeWorkspaceFile(ctx, input.path, bytes, input.overwrite);
     const pages = (await PDFDocument.load(bytes)).getPageCount();
-    return [{ type: "text", text: `Created ${saved} (${pages} page(s), ${bytes.byteLength} bytes)` }];
+    return [
+      { type: "text", text: `Created ${saved} (${pages} page(s), ${bytes.byteLength} bytes)` },
+      ...linkLine(ctx, saved),
+    ];
   },
 });
 
@@ -249,7 +253,10 @@ export const pdfMerge = defineTool({
     }
     const bytes = await merged.save();
     const saved = await writeWorkspaceFile(ctx, input.output, bytes, input.overwrite);
-    return [{ type: "text", text: `Merged ${input.inputs.length} files into ${saved} (${merged.getPageCount()} pages)` }];
+    return [
+      { type: "text", text: `Merged ${input.inputs.length} files into ${saved} (${merged.getPageCount()} pages)` },
+      ...linkLine(ctx, saved),
+    ];
   },
 });
 

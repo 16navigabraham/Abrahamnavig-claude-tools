@@ -63,6 +63,24 @@ describe("pdf tools", () => {
     await expect(pdfInfo.run({ path: "/etc/passwd.pdf" }, ctx)).rejects.toThrow(/outside the workspace/);
   });
 
+  it("rejects a symlink inside the workspace that points outside it", async () => {
+    // A lexical path.resolve() check alone would pass here — the symlink's own
+    // NAME is inside the workspace — but every fs call that follows it lands
+    // outside. resolveInWorkspace must catch this via realpath, not just string
+    // comparison. Regression test for a Copilot-flagged finding on PR #1.
+    const outside = await fs.mkdtemp(path.join(os.tmpdir(), "claude-tools-outside-"));
+    await fs.writeFile(path.join(outside, "secret.pdf"), "%PDF-1.4\nnot yours");
+    const link = path.join(ctx.workspace, "escape-link");
+    await fs.symlink(outside, link, "dir");
+    try {
+      await expect(pdfInfo.run({ path: "escape-link/secret.pdf" }, ctx)).rejects.toThrow(/outside the workspace/);
+      // Also block writing THROUGH a symlink, not just reading through one.
+      await expect(create("escape-link/pwned.pdf", "x")).rejects.toThrow(/outside the workspace/);
+    } finally {
+      await fs.rm(outside, { recursive: true, force: true });
+    }
+  });
+
   it("reads a page range and reports missing files", async () => {
     await create("r.pdf", "text");
     await expect(pdfRead.run(pdfRead.inputSchema.parse({ path: "r.pdf", start_page: 3 }), ctx)).rejects.toThrow(/past the end/);

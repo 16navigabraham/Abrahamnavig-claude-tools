@@ -2,7 +2,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { parseBlocks, pdfCreate, pdfInfo, pdfMerge, pdfRead, pdfView } from "../src/tools/pdf.js";
+import { buildPdf, parseBlocks, pdfCreate, pdfInfo, pdfMerge, pdfRead, pdfView } from "../src/tools/pdf.js";
 import type { ToolContext } from "../src/tools/types.js";
 
 let ctx: ToolContext;
@@ -18,13 +18,20 @@ const create = (p: string, content: string, extra: Record<string, unknown> = {})
   pdfCreate.run(pdfCreate.inputSchema.parse({ path: p, content, ...extra }), ctx);
 
 describe("parseBlocks", () => {
-  it("parses headings, bullets and paragraphs", () => {
+  it("parses headings, bullets and paragraphs, preserving line breaks within a paragraph", () => {
     expect(parseBlocks("# Title\nline one\nline two\n\n- a\n- b\n## Sub")).toEqual([
       { kind: "h1", text: "Title" },
-      { kind: "p", text: "line one line two" },
+      { kind: "p", lines: ["line one", "line two"] },
       { kind: "li", text: "a" },
       { kind: "li", text: "b" },
       { kind: "h2", text: "Sub" },
+    ]);
+  });
+
+  it("starts a new paragraph only on a blank line", () => {
+    expect(parseBlocks("a\nb\n\nc")).toEqual([
+      { kind: "p", lines: ["a", "b"] },
+      { kind: "p", lines: ["c"] },
     ]);
   });
 });
@@ -50,6 +57,23 @@ describe("pdf tools", () => {
     await create("long.pdf", `${long}\nNaira ₦ and emoji 🚀`);
     const [info] = await pdfInfo.run({ path: "long.pdf" }, ctx);
     expect(JSON.parse(info.type === "text" ? info.text : "{}").pages).toBeGreaterThan(5);
+  });
+
+  it("reports how many characters couldn't be rendered, silently for none", async () => {
+    const [clean] = await create("clean.pdf", "Plain ASCII only.");
+    expect(clean.type === "text" && clean.text).not.toContain("could not");
+
+    // ₦ and 🚀 fall outside WinAnsi -> 2 substitutions.
+    const [warned] = await create("unicode.pdf", "Naira ₦ and emoji 🚀");
+    expect(warned.type === "text" && warned.text).toContain("2 character(s)");
+  });
+
+  it("buildPdf counts substitutions directly", async () => {
+    const clean = await buildPdf({ content: "hello world", pageSize: "A4" });
+    expect(clean.unsupportedChars).toBe(0);
+
+    const unicode = await buildPdf({ content: "₦₦₦", pageSize: "A4" });
+    expect(unicode.unsupportedChars).toBe(3);
   });
 
   it("refuses to overwrite unless asked", async () => {

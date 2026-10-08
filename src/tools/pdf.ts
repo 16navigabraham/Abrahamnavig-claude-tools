@@ -21,15 +21,20 @@ const PAGE_SIZES = { A4: [595.28, 841.89], Letter: [612, 792] } as const;
 const MARGIN = 56;
 
 type Block =
-  | { kind: "h1" | "h2" | "p"; text: string }
-  | { kind: "li"; text: string };
+  | { kind: "h1"; text: string }
+  | { kind: "h2"; text: string }
+  | { kind: "li"; text: string }
+  // A paragraph is its own input lines, not one joined string: a single line
+  // break stays a line break (drawn as a forced break), a blank line starts a
+  // new paragraph (drawn with the usual gap after).
+  | { kind: "p"; lines: string[] };
 
 /** Parse a small Markdown subset: `#`/`##` headings, `-`/`*` bullets, blank-line paragraphs. */
 export function parseBlocks(content: string): Block[] {
   const blocks: Block[] = [];
   let para: string[] = [];
   const flush = () => {
-    if (para.length) blocks.push({ kind: "p", text: para.join(" ") });
+    if (para.length) blocks.push({ kind: "p", lines: para });
     para = [];
   };
   for (const raw of content.replace(/\r\n?/g, "\n").split("\n")) {
@@ -53,8 +58,11 @@ export function parseBlocks(content: string): Block[] {
   return blocks;
 }
 
-/** The standard PDF fonts only cover WinAnsi; swap anything else for "?" instead of failing. */
-function encodable(font: PDFFont, text: string): string {
+/**
+ * The standard PDF fonts only cover WinAnsi; swap anything else for "?" instead of
+ * failing, and count the swaps so the caller can tell the user some text didn't render.
+ */
+function encodable(font: PDFFont, text: string, stats: { replaced: number }): string {
   let out = "";
   for (const ch of text) {
     try {
@@ -62,6 +70,7 @@ function encodable(font: PDFFont, text: string): string {
       out += ch;
     } catch {
       out += "?";
+      stats.replaced++;
     }
   }
   return out;
@@ -88,7 +97,7 @@ export async function buildPdf(opts: {
   author?: string;
   content: string;
   pageSize: keyof typeof PAGE_SIZES;
-}): Promise<Uint8Array> {
+}): Promise<{ bytes: Uint8Array; unsupportedChars: number }> {
   const doc = await PDFDocument.create();
   const regular = await doc.embedFont(StandardFonts.Helvetica);
   const bold = await doc.embedFont(StandardFonts.HelveticaBold);
@@ -101,10 +110,11 @@ export async function buildPdf(opts: {
 
   let page: PDFPage = doc.addPage([pageW, pageH]);
   let y = pageH - MARGIN;
+  const stats = { replaced: 0 };
 
   const draw = (text: string, font: PDFFont, size: number, indent = 0, gapAfter = 6) => {
     const lineH = size * 1.35;
-    for (const line of wrap(font, size, encodable(font, text), textW - indent)) {
+    for (const line of wrap(font, size, encodable(font, text, stats), textW - indent)) {
       if (y - lineH < MARGIN) {
         page = doc.addPage([pageW, pageH]);
         y = pageH - MARGIN;
@@ -120,10 +130,15 @@ export async function buildPdf(opts: {
     if (block.kind === "h1") draw(block.text, bold, 17, 0, 8);
     else if (block.kind === "h2") draw(block.text, bold, 14, 0, 6);
     else if (block.kind === "li") draw(`• ${block.text}`, regular, 11, 12, 3);
-    else draw(block.text, regular, 11, 0, 8);
+    else {
+      // Each input line is its own forced break; only the paragraph's last
+      // line gets the normal gap-after, so lines within it stay tight.
+      const { lines } = block;
+      lines.forEach((line, i) => draw(line, regular, 11, 0, i === lines.length - 1 ? 8 : 0));
+    }
   }
 
-  return doc.save();
+  return { bytes: await doc.save(), unsupportedChars: stats.replaced };
 }
 
 // ---------------------------------------------------------------------------
@@ -146,7 +161,7 @@ export const pdfCreate = defineTool({
     overwrite: z.boolean().default(false),
   }),
   async run(input, ctx) {
-    const bytes = await buildPdf({
+    const { bytes, unsupportedChars } = await buildPdf({
       title: input.title,
       author: input.author,
       content: input.content,
@@ -154,8 +169,12 @@ export const pdfCreate = defineTool({
     });
     const saved = await writeWorkspaceFile(ctx, input.path, bytes, input.overwrite);
     const pages = (await PDFDocument.load(bytes)).getPageCount();
+    const warning =
+      unsupportedChars > 0
+        ? ` — note: ${unsupportedChars} character(s) outside the supported Latin set were replaced with "?"`
+        : "";
     return [
-      { type: "text", text: `Created ${saved} (${pages} page(s), ${bytes.byteLength} bytes)` },
+      { type: "text", text: `Created ${saved} (${pages} page(s), ${bytes.byteLength} bytes)${warning}` },
       ...linkLine(ctx, saved),
     ];
   },
@@ -206,12 +225,12 @@ export const pdfInfo = defineTool({
       pages: proxy.numPages,
       bytes: size,
       first_page_size_pt: { width: Math.round(w), height: Math.round(h) },
-      title: info.Title ?? null,
-      author: info.Author ?? null,
-      creator: info.Creator ?? null,
-      producer: info.Producer ?? null,
-      created: info.CreationDate ?? null,
-      modified: info.ModDate ?? null,
+      title: info.Title || null,
+      author: info.Author || null,
+      creator: info.Creator || null,
+      producer: info.Producer || null,
+      created: info.CreationDate || null,
+      modified: info.ModDate || null,
     };
     return [{ type: "text", text: JSON.stringify(summary, null, 2) }];
   },

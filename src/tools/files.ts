@@ -55,7 +55,14 @@ const publicLookup: net.LookupFunction = (hostname, options, callback) => {
   });
 };
 
-async function fetchPublic(url: string, redirects = 0): Promise<Uint8Array> {
+interface FetchResult {
+  data: Uint8Array;
+  finalUrl: string;
+  status: number;
+  contentType: string;
+}
+
+async function fetchPublic(url: string, redirects = 0): Promise<FetchResult> {
   let parsed: URL;
   try {
     parsed = new URL(url);
@@ -75,12 +82,19 @@ async function fetchPublic(url: string, redirects = 0): Promise<Uint8Array> {
       const status = res.statusCode ?? 0;
       if (status >= 300 && status < 400 && res.headers.location) {
         res.resume();
-        if (redirects >= MAX_REDIRECTS) return reject(new ToolError("Too many redirects"));
-        return resolve(fetchPublic(new URL(res.headers.location, parsed).toString(), redirects + 1));
+        if (redirects >= MAX_REDIRECTS) return reject(new ToolError(`Too many redirects (stopped at ${parsed})`));
+        let next: string;
+        try {
+          next = new URL(res.headers.location, parsed).toString();
+        } catch {
+          return reject(new ToolError(`${parsed} redirected to an invalid URL: ${res.headers.location}`));
+        }
+        return resolve(fetchPublic(next, redirects + 1));
       }
+      const contentType = (res.headers["content-type"] ?? "unknown").split(";")[0].trim();
       if (status !== 200) {
         res.resume();
-        return reject(new ToolError(`Download failed with HTTP ${status}`));
+        return reject(new ToolError(`Download failed: got HTTP ${status} (${contentType}) from ${parsed}`));
       }
       const chunks: Buffer[] = [];
       let size = 0;
@@ -93,7 +107,9 @@ async function fetchPublic(url: string, redirects = 0): Promise<Uint8Array> {
           chunks.push(chunk);
         }
       });
-      res.on("end", () => resolve(new Uint8Array(Buffer.concat(chunks))));
+      res.on("end", () =>
+        resolve({ data: new Uint8Array(Buffer.concat(chunks)), finalUrl: parsed.toString(), status, contentType }),
+      );
       res.on("error", reject);
     });
     req.on("timeout", () => req.destroy(new ToolError("Download timed out")));
@@ -117,9 +133,13 @@ export const pdfImportUrl = defineTool({
     overwrite: z.boolean().default(false),
   }),
   async run(input, ctx) {
-    const data = await fetchPublic(input.url);
+    const { data, finalUrl, contentType } = await fetchPublic(input.url);
     if (Buffer.from(data.subarray(0, 5)).toString("latin1") !== "%PDF-") {
-      throw new ToolError("The URL did not return a PDF");
+      const redirectedNote = finalUrl !== input.url ? ` (followed redirect(s) to ${finalUrl})` : "";
+      throw new ToolError(
+        `The URL did not return a PDF: got HTTP 200 with content-type "${contentType}"${redirectedNote}. ` +
+          `This is often a landing page or a client-side redirect rather than a direct PDF link.`,
+      );
     }
     const saved = await writeWorkspaceFile(ctx, input.path, data, input.overwrite);
     return [{ type: "text", text: `Imported ${saved} (${data.byteLength} bytes)` }, ...linkLine(ctx, saved)];

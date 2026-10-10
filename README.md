@@ -19,6 +19,7 @@ Document, image, QR and data tools for Claude. One set of tool definitions is ex
 | `image_edit` | write | Resize, convert (PNG/JPEG/WebP) and/or compress an image already in the workspace |
 | `qr_create` | write | Generate a QR code PNG from text or a URL |
 | `csv_create` | write | Build a CSV file from headers and rows of data |
+| `ocr_extract` | read | Extract text from an image (scanned docs, ID cards, certificates) via OCR. English only, for now |
 | `files_list` | read | List the files in the workspace |
 | `file_link` | read | Get a time-limited download link for a file (online only) |
 
@@ -43,6 +44,8 @@ An image is scaled down to fit the page (never upscaled) and starts a new page i
 ```
 
 The separator row's colons set column alignment (`:---` left, `---:` right, `:---:` center; plain `---` defaults to left). A row longer than the header is truncated, a shorter one is padded with blank cells. A tall table breaks across pages like everything else.
+
+**`ocr_extract`:** upload an image with `upload_file`, then run OCR on it — for a scanned certificate, an ID card, a BVN slip, anything with no real text layer. English only right now. The first call after the server starts is slow (a few seconds) while it downloads and loads the language model from the internet; every call after that reuses the same loaded model and is fast. A redeploy or restart re-downloads it once.
 
 All paths are relative to a **workspace** directory (`CLAUDE_TOOLS_WORKSPACE`, default `./workspace`). Paths that escape it are rejected. Write tools never replace an existing file unless `overwrite: true` is passed.
 
@@ -154,4 +157,4 @@ Tools live in `src/tools/`. Each one is a `defineTool({ name, kind, inputSchema,
 
 - `pdf_create` uses the standard PDF fonts, so it renders Latin text only. Other characters, such as ₦ or emoji, become `?`. Embedding a Unicode TTF would fix this.
 - `pdf_view` accepts files up to 32 MB, which is the Claude API's request limit.
-- No OCR / text extraction from images or scanned PDFs yet.
+- `ocr_extract` works on images; it doesn't rasterize a scanned PDF page first, so OCR on a scanned PDF (no text layer) isn't supported yet — only on an image file directly.

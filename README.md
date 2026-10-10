@@ -14,6 +14,8 @@ Document, image, QR and data tools for Claude. One set of tool definitions is ex
 | `pdf_info` | read | Page count, page size, file size and metadata |
 | `pdf_view` | read | Hand the PDF itself to Claude so it sees layout, tables and scanned pages |
 | `pdf_merge` | write | Combine PDFs in order into a new file |
+| `pdf_split` | write | Extract a page range from a PDF into a new PDF |
+| `pdf_search` | read | Search for text across one or every PDF in the workspace, with a snippet of context per match |
 | `pdf_import_url` | write | Download a PDF from a public URL into the workspace (max 32 MB). It won't fetch from private or internal addresses |
 | `upload_file` | write | Host any file (any type, up to 32 MB) from base64 data and get a shareable signed link back — also how to get an image into the workspace for `pdf_create` |
 | `image_edit` | write | Resize, convert (PNG/JPEG/WebP) and/or compress an image already in the workspace |
@@ -22,6 +24,8 @@ Document, image, QR and data tools for Claude. One set of tool definitions is ex
 | `ocr_extract` | read | Extract text from an image (scanned docs, ID cards, certificates) via OCR. English only, for now |
 | `files_list` | read | List the files in the workspace |
 | `file_link` | read | Get a time-limited download link for a file (online only) |
+| `file_move` | write | Move or rename a file within the workspace |
+| `file_delete` | write | Delete a file, or a folder and its contents with `recursive: true` |
 
 When the server runs online, every write tool includes a download link in its result.
 

@@ -27,7 +27,9 @@ describe("MCP server", () => {
     const byName = Object.fromEntries(tools.map((t) => [t.name, t]));
     expect(Object.keys(byName).sort()).toEqual([
       "csv_create",
+      "file_delete",
       "file_link",
+      "file_move",
       "files_list",
       "image_edit",
       "ocr_extract",
@@ -36,6 +38,8 @@ describe("MCP server", () => {
       "pdf_info",
       "pdf_merge",
       "pdf_read",
+      "pdf_search",
+      "pdf_split",
       "pdf_view",
       "qr_create",
       "upload_file",

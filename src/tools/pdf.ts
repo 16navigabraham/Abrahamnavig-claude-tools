@@ -1,3 +1,5 @@
+import fs from "node:fs/promises";
+import path from "node:path";
 import { PDFDocument, StandardFonts, rgb, type PDFFont, type PDFPage } from "pdf-lib";
 import { extractText, getDocumentProxy, getMeta } from "unpdf";
 import { z } from "zod";
@@ -446,4 +448,106 @@ export const pdfMerge = defineTool({
   },
 });
 
-export const pdfTools = [pdfCreate, pdfRead, pdfInfo, pdfView, pdfMerge];
+export const pdfSplit = defineTool({
+  name: "pdf_split",
+  title: "Split / extract PDF pages",
+  kind: "write",
+  description: "Extract a page range from a PDF into a new PDF, e.g. to pull one paper out of a merged pack.",
+  inputSchema: z.object({
+    path: pdfPath,
+    output: pdfPath,
+    start_page: z.number().int().min(1).default(1),
+    end_page: z.number().int().min(1).optional().describe("Inclusive. Defaults to the last page"),
+    overwrite: z.boolean().default(false),
+  }),
+  async run(input, ctx) {
+    const src = await PDFDocument.load(await readWorkspaceFile(ctx, input.path));
+    const total = src.getPageCount();
+    const end = Math.min(input.end_page ?? total, total);
+    if (input.start_page > end) {
+      throw new ToolError(`start_page ${input.start_page} is past the end (${total} pages)`);
+    }
+    const indices: number[] = [];
+    for (let i = input.start_page; i <= end; i++) indices.push(i - 1);
+    const out = await PDFDocument.create();
+    const pages = await out.copyPages(src, indices);
+    pages.forEach((p) => out.addPage(p));
+    const bytes = await out.save();
+    const saved = await writeWorkspaceFile(ctx, input.output, bytes, input.overwrite);
+    return [
+      { type: "text", text: `Extracted pages ${input.start_page}-${end} of ${total} from ${input.path} into ${saved}` },
+      ...linkLine(ctx, saved),
+    ];
+  },
+});
+
+export const pdfSearch = defineTool({
+  name: "pdf_search",
+  title: "Search text in PDFs",
+  kind: "read",
+  description:
+    "Search for text across all PDFs in the workspace, or within one PDF if path is given. Case-insensitive, " +
+    "matches a plain substring (not a regex). Returns the page and a snippet of context for each match.",
+  inputSchema: z.object({
+    query: z.string().min(1),
+    path: pdfPath.optional().describe("Search only this PDF; omit to search every PDF in the workspace"),
+    max_results: z.number().int().min(1).max(200).default(50),
+  }),
+  async run(input, ctx) {
+    let targets: string[];
+    if (input.path) {
+      targets = [input.path];
+    } else {
+      targets = [];
+      const walk = async (dir: string): Promise<void> => {
+        let entries;
+        try {
+          entries = await fs.readdir(dir, { withFileTypes: true });
+        } catch {
+          return;
+        }
+        for (const e of entries.sort((a, b) => a.name.localeCompare(b.name))) {
+          const full = path.join(dir, e.name);
+          if (e.isDirectory()) await walk(full);
+          else if (e.isFile() && /\.pdf$/i.test(e.name)) targets.push(path.relative(ctx.workspace, full));
+        }
+      };
+      await walk(ctx.workspace);
+      if (targets.length === 0) return [{ type: "text", text: "No PDFs in the workspace." }];
+    }
+
+    const needle = input.query.toLowerCase();
+    const results: string[] = [];
+    for (const rel of targets) {
+      let text: string[];
+      try {
+        const data = await readWorkspaceFile(ctx, rel);
+        ({ text } = await extractText(await getDocumentProxy(data), { mergePages: false }));
+      } catch (err) {
+        if (input.path) throw err;
+        continue;
+      }
+      for (let i = 0; i < text.length; i++) {
+        const pageText = text[i] || "";
+        const lower = pageText.toLowerCase();
+        let idx = lower.indexOf(needle);
+        while (idx !== -1) {
+          const start = Math.max(0, idx - 40);
+          const end = Math.min(pageText.length, idx + needle.length + 40);
+          const snippet = pageText.slice(start, end).replace(/\s+/g, " ").trim();
+          results.push(`${rel} p.${i + 1}: …${snippet}…`);
+          if (results.length >= input.max_results) {
+            return [{ type: "text", text: results.join("\n") + `\n\n(stopped at ${input.max_results} results)` }];
+          }
+          idx = lower.indexOf(needle, idx + needle.length);
+        }
+      }
+    }
+    if (results.length === 0) {
+      return [{ type: "text", text: `No matches for "${input.query}" in ${input.path ?? `${targets.length} PDF(s)`}` }];
+    }
+    return [{ type: "text", text: results.join("\n") }];
+  },
+});
+
+export const pdfTools = [pdfCreate, pdfRead, pdfInfo, pdfView, pdfMerge, pdfSplit, pdfSearch];

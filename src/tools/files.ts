@@ -184,8 +184,10 @@ export const uploadFile = defineTool({
   title: "Upload file",
   kind: "write",
   description:
-    "Save a file into the workspace from base64-encoded data — most commonly an image (PNG/JPEG) " +
-    "to use with pdf_create: upload it here first, then reference it from pdf_create's content as " +
+    "Save any file into the workspace from base64-encoded data and get back a shareable signed " +
+    "download link — the general-purpose way to host a file (an image, a logo, a document, " +
+    "anything) and hand the user a URL for it. Also how to get an image into the workspace for " +
+    "pdf_create: upload it here first, then reference it from pdf_create's content as " +
     "![alt text](path), the same path you upload it to. Up to 32 MB. Fails if the destination " +
     "exists unless overwrite is true.",
   inputSchema: z.object({

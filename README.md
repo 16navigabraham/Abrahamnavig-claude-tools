@@ -15,7 +15,7 @@ PDF tools for Claude. One set of tool definitions is exposed two ways:
 | `pdf_view` | read | Hand the PDF itself to Claude so it sees layout, tables and scanned pages |
 | `pdf_merge` | write | Combine PDFs in order into a new file |
 | `pdf_import_url` | write | Download a PDF from a public URL into the workspace (max 32 MB). It won't fetch from private or internal addresses |
-| `upload_file` | write | Save a file (usually an image) into the workspace from base64 data, to reference from `pdf_create` |
+| `upload_file` | write | Host any file (any type, up to 32 MB) from base64 data and get a shareable signed link back — also how to get an image into the workspace for `pdf_create` |
 | `files_list` | read | List the files in the workspace |
 | `file_link` | read | Get a time-limited download link for a file (online only) |
 

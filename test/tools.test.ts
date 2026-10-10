@@ -1,6 +1,7 @@
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { PDFDocument } from "pdf-lib";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { buildPdf, imagePaths, parseBlocks, pdfCreate, pdfInfo, pdfMerge, pdfRead, pdfView } from "../src/tools/pdf.js";
 import { uploadFile } from "../src/tools/files.js";
@@ -40,6 +41,32 @@ describe("parseBlocks", () => {
       { kind: "p", lines: ["c"] },
     ]);
   });
+
+  it("parses a GFM-style pipe table with per-column alignment", () => {
+    const md = "| Name | Fee | Notes |\n|:---|---:|:---:|\n| Anchor | 1.5 | ok |\n| Interswitch | 2 | — |";
+    expect(parseBlocks(md)).toEqual([
+      {
+        kind: "table",
+        header: ["Name", "Fee", "Notes"],
+        align: ["left", "right", "center"],
+        rows: [
+          ["Anchor", "1.5", "ok"],
+          ["Interswitch", "2", "—"],
+        ],
+      },
+    ]);
+  });
+
+  it("requires an actual separator row — a stray line with pipes stays a paragraph", () => {
+    expect(parseBlocks("| not a table |\njust text")).toEqual([{ kind: "p", lines: ["| not a table |", "just text"] }]);
+  });
+
+  it("keeps body rows exactly as written, even when shorter/longer than the header", () => {
+    // Padding/truncating to the header's column count happens at render time in buildPdf,
+    // not in parseBlocks — this just confirms parsing doesn't silently drop/alter data.
+    const [block] = parseBlocks("| a | b |\n|---|---|\n| only-one |\n| x | y | z |");
+    expect(block).toEqual({ kind: "table", header: ["a", "b"], align: ["left", "left"], rows: [["only-one"], ["x", "y", "z"]] });
+  });
 });
 
 describe("pdf tools", () => {
@@ -72,6 +99,32 @@ describe("pdf tools", () => {
     // ₦ and 🚀 fall outside WinAnsi -> 2 substitutions.
     const [warned] = await create("unicode.pdf", "Naira ₦ and emoji 🚀");
     expect(warned.type === "text" && warned.text).toContain("2 character(s)");
+  });
+
+  it("renders a real bordered table from GFM syntax, header and all rows present", async () => {
+    const table = "| Provider | Fee |\n|:---|---:|\n| Anchor | 1.5% |\n| Interswitch | 2% |";
+    const [res] = await create("table.pdf", `# Comparison\n\n${table}\n\nAfter the table.`);
+    expect(res.type === "text" && res.text).toContain("Created table.pdf");
+
+    const [text] = await pdfRead.run(pdfRead.inputSchema.parse({ path: "table.pdf" }), ctx);
+    const body = text.type === "text" ? text.text : "";
+    for (const expected of ["Provider", "Fee", "Anchor", "1.5%", "Interswitch", "2%", "After the table."]) {
+      expect(body).toContain(expected);
+    }
+  });
+
+  it("pads a short row and truncates a long one to the header's column count when rendering", async () => {
+    const md = "| a | b | c |\n|---|---|---|\n| only-one |\n| x | y | z | extra |";
+    const { bytes } = await buildPdf({ content: md, pageSize: "A4" });
+    expect(Buffer.from(bytes.subarray(0, 5)).toString("latin1")).toBe("%PDF-"); // doesn't throw on ragged rows
+  });
+
+  it("breaks a table across pages when it doesn't fit on one", async () => {
+    const rows = Array.from({ length: 80 }, (_, i) => `| Row ${i} | value ${i} |`).join("\n");
+    const md = `| Key | Value |\n|---|---|\n${rows}`;
+    const { bytes } = await buildPdf({ content: md, pageSize: "A4" });
+    const doc = await PDFDocument.load(bytes);
+    expect(doc.getPageCount()).toBeGreaterThan(1);
   });
 
   it("buildPdf counts substitutions directly", async () => {

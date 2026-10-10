@@ -20,6 +20,8 @@ const pdfPath = z
 const PAGE_SIZES = { A4: [595.28, 841.89], Letter: [612, 792] } as const;
 const MARGIN = 56;
 
+type Align = "left" | "center" | "right";
+
 type Block =
   | { kind: "h1"; text: string }
   | { kind: "h2"; text: string }
@@ -27,12 +29,17 @@ type Block =
   // Standard Markdown image syntax, on its own line: ![alt](workspace-relative-path).
   // The path is looked up in the `images` map passed to buildPdf.
   | { kind: "img"; alt: string; path: string }
+  // GFM-style pipe table: a header row, a |---|---| separator (colons set
+  // alignment), then zero or more body rows, each starting and ending with |.
+  | { kind: "table"; header: string[]; align: Align[]; rows: string[][] }
   // A paragraph is its own input lines, not one joined string: a single line
   // break stays a line break (drawn as a forced break), a blank line starts a
   // new paragraph (drawn with the usual gap after).
   | { kind: "p"; lines: string[] };
 
 const IMAGE_LINE = /^!\[([^\]]*)\]\(([^)]+)\)$/;
+const TABLE_ROW = /^\|.+\|$/;
+const TABLE_SEPARATOR_CELL = /^:?-+:?$/;
 
 /** Every image path referenced in `content`, e.g. to pre-fetch before calling buildPdf. */
 export function imagePaths(content: string): string[] {
@@ -44,33 +51,83 @@ export function imagePaths(content: string): string[] {
   return [...paths];
 }
 
-/** Parse a small Markdown subset: `#`/`##` headings, `-`/`*` bullets, `![alt](path)` images, blank-line paragraphs. */
+/** Splits `| a | b |` into `["a", "b"]`. Doesn't handle an escaped `\|` inside a cell. */
+function splitTableRow(line: string): string[] {
+  return line
+    .trim()
+    .replace(/^\|/, "")
+    .replace(/\|$/, "")
+    .split("|")
+    .map((c) => c.trim());
+}
+
+function tableAlignment(separatorLine: string): Align[] {
+  return splitTableRow(separatorLine).map((cell) => {
+    const left = cell.startsWith(":");
+    const right = cell.endsWith(":");
+    if (left && right) return "center";
+    if (right) return "right";
+    return "left";
+  });
+}
+
+function isTableSeparator(line: string): boolean {
+  if (!TABLE_ROW.test(line)) return false;
+  const cells = splitTableRow(line);
+  return cells.length > 0 && cells.every((c) => TABLE_SEPARATOR_CELL.test(c));
+}
+
+/**
+ * Parse a small Markdown subset: `#`/`##` headings, `-`/`*` bullets, `![alt](path)`
+ * images, GFM-style pipe tables, blank-line paragraphs.
+ */
 export function parseBlocks(content: string): Block[] {
   const blocks: Block[] = [];
+  const lines = content.replace(/\r\n?/g, "\n").split("\n");
   let para: string[] = [];
   const flush = () => {
     if (para.length) blocks.push({ kind: "p", lines: para });
     para = [];
   };
-  for (const raw of content.replace(/\r\n?/g, "\n").split("\n")) {
-    const line = raw.trim();
+
+  let i = 0;
+  while (i < lines.length) {
+    const line = lines[i].trim();
     const imgMatch = IMAGE_LINE.exec(line);
     if (!line) {
       flush();
+      i++;
     } else if (line.startsWith("## ")) {
       flush();
       blocks.push({ kind: "h2", text: line.slice(3).trim() });
+      i++;
     } else if (line.startsWith("# ")) {
       flush();
       blocks.push({ kind: "h1", text: line.slice(2).trim() });
+      i++;
     } else if (/^[-*] /.test(line)) {
       flush();
       blocks.push({ kind: "li", text: line.slice(2).trim() });
+      i++;
     } else if (imgMatch) {
       flush();
       blocks.push({ kind: "img", alt: imgMatch[1], path: imgMatch[2] });
+      i++;
+    } else if (TABLE_ROW.test(line) && i + 1 < lines.length && isTableSeparator(lines[i + 1].trim())) {
+      flush();
+      const header = splitTableRow(line);
+      const align = tableAlignment(lines[i + 1].trim());
+      while (align.length < header.length) align.push("left");
+      i += 2;
+      const rows: string[][] = [];
+      while (i < lines.length && TABLE_ROW.test(lines[i].trim())) {
+        rows.push(splitTableRow(lines[i].trim()));
+        i++;
+      }
+      blocks.push({ kind: "table", header, align: align.slice(0, header.length), rows });
     } else {
       para.push(line);
+      i++;
     }
   }
   flush();
@@ -176,12 +233,61 @@ export async function buildPdf(opts: {
     if (alt) draw(alt, regular, 9, 0, 8);
   };
 
+  const TABLE_FONT_SIZE = 9;
+  const CELL_PAD_X = 4;
+  const CELL_PAD_Y = 4;
+  const BORDER = rgb(0.7, 0.7, 0.7);
+  const HEADER_FILL = rgb(0.92, 0.92, 0.92);
+
+  const drawTable = (header: string[], align: Align[], bodyRows: string[][]) => {
+    const cols = header.length;
+    if (cols === 0) return;
+    const colW = textW / cols;
+    const rows = [header, ...bodyRows.map((r) => Array.from({ length: cols }, (_, c) => r[c] ?? ""))];
+
+    rows.forEach((row, rowIndex) => {
+      const isHeader = rowIndex === 0;
+      const font = isHeader ? bold : regular;
+      const lineH = TABLE_FONT_SIZE * 1.3;
+      const cellLines = row.map((cell) => wrap(font, TABLE_FONT_SIZE, encodable(font, cell, stats), colW - CELL_PAD_X * 2));
+      const rowH = Math.max(1, ...cellLines.map((l) => l.length)) * lineH + CELL_PAD_Y * 2;
+
+      if (y - rowH < MARGIN) {
+        page = doc.addPage([pageW, pageH]);
+        y = pageH - MARGIN;
+      }
+      const rowTop = y;
+      if (isHeader) {
+        page.drawRectangle({ x: MARGIN, y: rowTop - rowH, width: textW, height: rowH, color: HEADER_FILL });
+      }
+      cellLines.forEach((lines, c) => {
+        const cellX = MARGIN + c * colW;
+        page.drawRectangle({ x: cellX, y: rowTop - rowH, width: colW, height: rowH, borderColor: BORDER, borderWidth: 0.5 });
+        lines.forEach((line, li) => {
+          const lineY = rowTop - CELL_PAD_Y - (li + 1) * lineH + (lineH - TABLE_FONT_SIZE) / 2;
+          const w = font.widthOfTextAtSize(line, TABLE_FONT_SIZE);
+          const cellAlign = align[c] ?? "left";
+          const x =
+            cellAlign === "center"
+              ? cellX + (colW - w) / 2
+              : cellAlign === "right"
+                ? cellX + colW - CELL_PAD_X - w
+                : cellX + CELL_PAD_X;
+          page.drawText(line, { x, y: lineY, size: TABLE_FONT_SIZE, font, color: rgb(0.1, 0.1, 0.1) });
+        });
+      });
+      y = rowTop - rowH;
+    });
+    y -= 8;
+  };
+
   if (opts.title) draw(opts.title, bold, 22, 0, 14);
   for (const block of parseBlocks(opts.content)) {
     if (block.kind === "h1") draw(block.text, bold, 17, 0, 8);
     else if (block.kind === "h2") draw(block.text, bold, 14, 0, 6);
     else if (block.kind === "li") draw(`• ${block.text}`, regular, 11, 12, 3);
     else if (block.kind === "img") await drawImage(block.alt, block.path);
+    else if (block.kind === "table") drawTable(block.header, block.align, block.rows);
     else {
       // Each input line is its own forced break; only the paragraph's last
       // line gets the normal gap-after, so lines within it stay tight.
@@ -202,10 +308,12 @@ export const pdfCreate = defineTool({
   kind: "write",
   description:
     "Create a new PDF from text. `content` supports a small Markdown subset: lines starting with " +
-    "'# ' or '## ' are headings, '- ' are bullets, blank lines separate paragraphs, and " +
-    "'![alt](path)' on its own line embeds a PNG/JPEG image — upload it into the workspace with " +
-    "upload_file first, then reference it by that same path. Only Latin characters render in text; " +
-    "others are replaced with '?'. Fails if the file exists unless overwrite is true.",
+    "'# ' or '## ' are headings, '- ' are bullets, blank lines separate paragraphs, '![alt](path)' " +
+    "on its own line embeds a PNG/JPEG image (upload it into the workspace with upload_file first, " +
+    "then reference that same path), and a GFM-style pipe table (a header row, a |---|---| " +
+    "separator — ':---'/'---:'/':---:' set column alignment — then body rows) renders as a real " +
+    "bordered table. Only Latin characters render in text; others are replaced with '?'. Fails if " +
+    "the file exists unless overwrite is true.",
   inputSchema: z.object({
     path: pdfPath,
     title: z.string().optional().describe("Shown as the first heading and stored as document metadata"),

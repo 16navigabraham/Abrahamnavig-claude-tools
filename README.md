@@ -9,7 +9,7 @@ Document, image, QR and data tools for Claude. One set of tool definitions is ex
 
 | Tool | Kind | What it does |
 |---|---|---|
-| `pdf_create` | write | Build a PDF from text with `#`/`##` headings, `-` bullets, paragraphs and `![alt](path)` images. Pages are added automatically |
+| `pdf_create` | write | Build a PDF from text with `#`/`##` headings, `-` bullets, paragraphs, `![alt](path)` images and GFM-style pipe tables. Pages are added automatically |
 | `pdf_read` | read | Extract text page by page, with an optional page range |
 | `pdf_info` | read | Page count, page size, file size and metadata |
 | `pdf_view` | read | Hand the PDF itself to Claude so it sees layout, tables and scanned pages |
@@ -32,6 +32,17 @@ pdf_create(path: "report.pdf", content: "# Report\n\n![Company logo](assets/logo
 ```
 
 An image is scaled down to fit the page (never upscaled) and starts a new page if it doesn't fit on the current one. A referenced image that wasn't uploaded fails the whole call with a clear error, before anything is written.
+
+**Tables in a created PDF:** a standard GFM pipe table renders as a real bordered grid, not plain text:
+
+```
+| Provider | Fee |
+|:---|---:|
+| Anchor | 1.5% |
+| Interswitch | 2% |
+```
+
+The separator row's colons set column alignment (`:---` left, `---:` right, `:---:` center; plain `---` defaults to left). A row longer than the header is truncated, a shorter one is padded with blank cells. A tall table breaks across pages like everything else.
 
 All paths are relative to a **workspace** directory (`CLAUDE_TOOLS_WORKSPACE`, default `./workspace`). Paths that escape it are rejected. Write tools never replace an existing file unless `overwrite: true` is passed.
 
@@ -142,6 +153,5 @@ Tools live in `src/tools/`. Each one is a `defineTool({ name, kind, inputSchema,
 ## Limits
 
 - `pdf_create` uses the standard PDF fonts, so it renders Latin text only. Other characters, such as ₦ or emoji, become `?`. Embedding a Unicode TTF would fix this.
-- `pdf_create` doesn't render Markdown tables — only headings, bullets, paragraphs and images. Use `csv_create` for tabular data instead.
 - `pdf_view` accepts files up to 32 MB, which is the Claude API's request limit.
 - No OCR / text extraction from images or scanned PDFs yet.

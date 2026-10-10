@@ -30,6 +30,7 @@ describe("MCP server", () => {
       "file_link",
       "files_list",
       "image_edit",
+      "ocr_extract",
       "pdf_create",
       "pdf_import_url",
       "pdf_info",

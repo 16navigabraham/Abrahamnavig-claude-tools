@@ -179,6 +179,39 @@ export const filesList = defineTool({
   },
 });
 
+export const uploadFile = defineTool({
+  name: "upload_file",
+  title: "Upload file",
+  kind: "write",
+  description:
+    "Save any file into the workspace from base64-encoded data and get back a shareable signed " +
+    "download link — the general-purpose way to host a file (an image, a logo, a document, " +
+    "anything) and hand the user a URL for it. Also how to get an image into the workspace for " +
+    "pdf_create: upload it here first, then reference it from pdf_create's content as " +
+    "![alt text](path), the same path you upload it to. Up to 32 MB. Fails if the destination " +
+    "exists unless overwrite is true.",
+  inputSchema: z.object({
+    path: z.string().min(1).describe("Destination path in the workspace, e.g. assets/logo.png"),
+    data: z.string().describe("Base64-encoded file content"),
+    overwrite: z.boolean().default(false),
+  }),
+  async run(input, ctx) {
+    // Buffer.from(str, "base64") never throws — it silently skips characters
+    // outside the base64 alphabet instead of rejecting the input, so garbage
+    // input would otherwise decode "successfully" into garbage bytes. Validate
+    // the shape first.
+    const stripped = input.data.replace(/\s+/g, "");
+    if (!/^[A-Za-z0-9+/]*={0,2}$/.test(stripped) || stripped.length % 4 !== 0) {
+      throw new ToolError("data is not valid base64");
+    }
+    const bytes = Buffer.from(stripped, "base64");
+    if (bytes.length === 0) throw new ToolError("Decoded file is empty — check the base64 data");
+    if (bytes.length > MAX_IMPORT_BYTES) throw new ToolError("File is larger than 32 MB");
+    const saved = await writeWorkspaceFile(ctx, input.path, bytes, input.overwrite);
+    return [{ type: "text", text: `Uploaded ${saved} (${bytes.length} bytes)` }, ...linkLine(ctx, saved)];
+  },
+});
+
 export const fileLink = defineTool({
   name: "file_link",
   title: "Get download link",
@@ -194,4 +227,4 @@ export const fileLink = defineTool({
   },
 });
 
-export const fileTools = [pdfImportUrl, filesList, fileLink];
+export const fileTools = [pdfImportUrl, uploadFile, filesList, fileLink];

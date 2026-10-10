@@ -1,6 +1,6 @@
 # Abrahamnavig Claude Tools
 
-PDF tools for Claude. One set of tool definitions is exposed two ways:
+Document, image, QR and data tools for Claude. One set of tool definitions is exposed two ways:
 
 - **MCP server**: connect Claude Desktop, Claude Code or any MCP client. It runs locally over stdio, or online over HTTPS (see [Deploy online](#deploy-online-oracle-cloud)).
 - **Claude API agent**: embed in your app's backend. It uses the Anthropic SDK tool runner, and your code approves each write.
@@ -9,16 +9,40 @@ PDF tools for Claude. One set of tool definitions is exposed two ways:
 
 | Tool | Kind | What it does |
 |---|---|---|
-| `pdf_create` | write | Build a PDF from text with `#`/`##` headings, `-` bullets and paragraphs. Pages are added automatically |
+| `pdf_create` | write | Build a PDF from text with `#`/`##` headings, `-` bullets, paragraphs, `![alt](path)` images and GFM-style pipe tables. Pages are added automatically |
 | `pdf_read` | read | Extract text page by page, with an optional page range |
 | `pdf_info` | read | Page count, page size, file size and metadata |
 | `pdf_view` | read | Hand the PDF itself to Claude so it sees layout, tables and scanned pages |
 | `pdf_merge` | write | Combine PDFs in order into a new file |
 | `pdf_import_url` | write | Download a PDF from a public URL into the workspace (max 32 MB). It won't fetch from private or internal addresses |
+| `upload_file` | write | Host any file (any type, up to 32 MB) from base64 data and get a shareable signed link back — also how to get an image into the workspace for `pdf_create` |
+| `image_edit` | write | Resize, convert (PNG/JPEG/WebP) and/or compress an image already in the workspace |
+| `qr_create` | write | Generate a QR code PNG from text or a URL |
+| `csv_create` | write | Build a CSV file from headers and rows of data |
 | `files_list` | read | List the files in the workspace |
 | `file_link` | read | Get a time-limited download link for a file (online only) |
 
-When the server runs online, `pdf_create`, `pdf_merge` and `pdf_import_url` include a download link in their result.
+When the server runs online, every write tool includes a download link in its result.
+
+**Images in a created PDF:** `pdf_create` only renders PNG/JPEG images it can find in the workspace — it can't fetch or generate them. Upload the image first with `upload_file`, then reference that same path from `content` using standard Markdown image syntax on its own line:
+
+```
+upload_file(path: "assets/logo.png", data: "<base64>")
+pdf_create(path: "report.pdf", content: "# Report\n\n![Company logo](assets/logo.png)\n\nBody text...")
+```
+
+An image is scaled down to fit the page (never upscaled) and starts a new page if it doesn't fit on the current one. A referenced image that wasn't uploaded fails the whole call with a clear error, before anything is written.
+
+**Tables in a created PDF:** a standard GFM pipe table renders as a real bordered grid, not plain text:
+
+```
+| Provider | Fee |
+|:---|---:|
+| Anchor | 1.5% |
+| Interswitch | 2% |
+```
+
+The separator row's colons set column alignment (`:---` left, `---:` right, `:---:` center; plain `---` defaults to left). A row longer than the header is truncated, a shorter one is padded with blank cells. A tall table breaks across pages like everything else.
 
 All paths are relative to a **workspace** directory (`CLAUDE_TOOLS_WORKSPACE`, default `./workspace`). Paths that escape it are rejected. Write tools never replace an existing file unless `overwrite: true` is passed.
 
@@ -124,9 +148,10 @@ docker compose down                             # stop (files are kept in the "w
 
 ## Adding tools
 
-Tools live in `src/tools/`. Each one is a `defineTool({ name, kind, inputSchema, run })` with a Zod schema. Add a file for a new family, for example `src/tools/image.ts` for image generation and editing, then spread it into `allTools` in `src/tools/index.ts`. The MCP server and the agent both pick it up.
+Tools live in `src/tools/`. Each one is a `defineTool({ name, kind, inputSchema, run })` with a Zod schema. Add a file for a new family, then spread it into `allTools` in `src/tools/index.ts`. The MCP server and the agent both pick it up.
 
 ## Limits
 
 - `pdf_create` uses the standard PDF fonts, so it renders Latin text only. Other characters, such as ₦ or emoji, become `?`. Embedding a Unicode TTF would fix this.
 - `pdf_view` accepts files up to 32 MB, which is the Claude API's request limit.
+- No OCR / text extraction from images or scanned PDFs yet.

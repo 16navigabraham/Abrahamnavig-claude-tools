@@ -3,8 +3,19 @@ import os from "node:os";
 import path from "node:path";
 import { PDFDocument } from "pdf-lib";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { buildPdf, imagePaths, parseBlocks, pdfCreate, pdfInfo, pdfMerge, pdfRead, pdfView } from "../src/tools/pdf.js";
-import { uploadFile } from "../src/tools/files.js";
+import {
+  buildPdf,
+  imagePaths,
+  parseBlocks,
+  pdfCreate,
+  pdfInfo,
+  pdfMerge,
+  pdfRead,
+  pdfSearch,
+  pdfSplit,
+  pdfView,
+} from "../src/tools/pdf.js";
+import { fileDelete, fileMove, uploadFile } from "../src/tools/files.js";
 import type { ToolContext } from "../src/tools/types.js";
 
 let ctx: ToolContext;
@@ -188,6 +199,66 @@ describe("pdf tools", () => {
   });
 });
 
+describe("pdf_split", () => {
+  it("extracts a page range into a new PDF", async () => {
+    await create("s1.pdf", "page one");
+    await create("s2.pdf", "page two");
+    await pdfMerge.run(pdfMerge.inputSchema.parse({ inputs: ["s1.pdf", "s2.pdf"], output: "pack.pdf" }), ctx);
+    const [res] = await pdfSplit.run(
+      pdfSplit.inputSchema.parse({ path: "pack.pdf", output: "part.pdf", start_page: 2, end_page: 2 }),
+      ctx,
+    );
+    expect(res.type === "text" && res.text).toContain("Extracted pages 2-2 of 2");
+
+    const [text] = await pdfRead.run(pdfRead.inputSchema.parse({ path: "part.pdf" }), ctx);
+    const body = text.type === "text" ? text.text : "";
+    expect(body).toContain("page two");
+    expect(body).not.toContain("page one");
+  });
+
+  it("defaults end_page to the last page and rejects an out-of-range start", async () => {
+    await create("one.pdf", "solo");
+    const [res] = await pdfSplit.run(pdfSplit.inputSchema.parse({ path: "one.pdf", output: "copy.pdf" }), ctx);
+    expect(res.type === "text" && res.text).toContain("Extracted pages 1-1 of 1");
+    await expect(
+      pdfSplit.run(pdfSplit.inputSchema.parse({ path: "one.pdf", output: "bad.pdf", start_page: 5 }), ctx),
+    ).rejects.toThrow(/past the end/);
+  });
+});
+
+describe("pdf_search", () => {
+  it("finds matches in a single named PDF with a snippet", async () => {
+    await create("doc.pdf", "The quick brown fox jumps over the lazy dog.");
+    const [res] = await pdfSearch.run(pdfSearch.inputSchema.parse({ query: "brown fox", path: "doc.pdf" }), ctx);
+    const body = res.type === "text" ? res.text : "";
+    expect(body).toContain("doc.pdf p.1");
+    expect(body).toContain("brown fox");
+  });
+
+  it("is case-insensitive and reports no matches clearly", async () => {
+    await create("doc.pdf", "Hello World");
+    const [found] = await pdfSearch.run(pdfSearch.inputSchema.parse({ query: "hello world", path: "doc.pdf" }), ctx);
+    expect(found.type === "text" && found.text).toContain("doc.pdf p.1");
+
+    const [missing] = await pdfSearch.run(pdfSearch.inputSchema.parse({ query: "nope", path: "doc.pdf" }), ctx);
+    expect(missing.type === "text" && missing.text).toContain("No matches");
+  });
+
+  it("searches every PDF in the workspace when no path is given", async () => {
+    await create("a.pdf", "apple pie recipe");
+    await create("b.pdf", "banana bread recipe");
+    const [res] = await pdfSearch.run(pdfSearch.inputSchema.parse({ query: "recipe" }), ctx);
+    const body = res.type === "text" ? res.text : "";
+    expect(body).toContain("a.pdf p.1");
+    expect(body).toContain("b.pdf p.1");
+  });
+
+  it("reports no PDFs when the workspace is empty", async () => {
+    const [res] = await pdfSearch.run(pdfSearch.inputSchema.parse({ query: "x" }), ctx);
+    expect(res.type === "text" && res.text).toBe("No PDFs in the workspace.");
+  });
+});
+
 describe("upload_file", () => {
   const upload = (p: string, data: string, extra: Record<string, unknown> = {}) =>
     uploadFile.run(uploadFile.inputSchema.parse({ path: p, data, ...extra }), ctx);
@@ -208,6 +279,55 @@ describe("upload_file", () => {
     await upload("a.png", TINY_PNG_BASE64);
     await expect(upload("a.png", TINY_PNG_BASE64)).rejects.toThrow(/already exists/);
     await expect(upload("a.png", TINY_PNG_BASE64, { overwrite: true })).resolves.toBeDefined();
+  });
+});
+
+describe("file_delete", () => {
+  it("deletes a file", async () => {
+    await uploadFile.run(uploadFile.inputSchema.parse({ path: "a.png", data: TINY_PNG_BASE64 }), ctx);
+    const [res] = await fileDelete.run(fileDelete.inputSchema.parse({ path: "a.png" }), ctx);
+    expect(res.type === "text" && res.text).toContain("Deleted a.png");
+    await expect(fs.stat(path.join(ctx.workspace, "a.png"))).rejects.toThrow();
+  });
+
+  it("refuses to delete a non-empty folder without recursive: true", async () => {
+    await uploadFile.run(uploadFile.inputSchema.parse({ path: "dir/a.png", data: TINY_PNG_BASE64 }), ctx);
+    await expect(fileDelete.run(fileDelete.inputSchema.parse({ path: "dir" }), ctx)).rejects.toThrow(/recursive: true/);
+    const [res] = await fileDelete.run(fileDelete.inputSchema.parse({ path: "dir", recursive: true }), ctx);
+    expect(res.type === "text" && res.text).toContain("Deleted dir (folder)");
+  });
+
+  it("refuses to delete the workspace root and reports a missing file clearly", async () => {
+    await expect(fileDelete.run(fileDelete.inputSchema.parse({ path: "." }), ctx)).rejects.toThrow(/workspace root/);
+    await expect(fileDelete.run(fileDelete.inputSchema.parse({ path: "nope.png" }), ctx)).rejects.toThrow(/not found/);
+  });
+});
+
+describe("file_move", () => {
+  it("moves/renames a file", async () => {
+    await uploadFile.run(uploadFile.inputSchema.parse({ path: "a.png", data: TINY_PNG_BASE64 }), ctx);
+    const [res] = await fileMove.run(fileMove.inputSchema.parse({ path: "a.png", destination: "out/b.png" }), ctx);
+    expect(res.type === "text" && res.text).toContain("Moved a.png to out/b.png");
+    await expect(fs.stat(path.join(ctx.workspace, "a.png"))).rejects.toThrow();
+    const bytes = await fs.readFile(path.join(ctx.workspace, "out/b.png"));
+    expect(bytes.subarray(0, 4)).toEqual(Buffer.from([0x89, 0x50, 0x4e, 0x47]));
+  });
+
+  it("refuses to overwrite an existing destination unless asked", async () => {
+    await uploadFile.run(uploadFile.inputSchema.parse({ path: "a.png", data: TINY_PNG_BASE64 }), ctx);
+    await uploadFile.run(uploadFile.inputSchema.parse({ path: "b.png", data: TINY_PNG_BASE64 }), ctx);
+    await expect(fileMove.run(fileMove.inputSchema.parse({ path: "a.png", destination: "b.png" }), ctx)).rejects.toThrow(
+      /already exists/,
+    );
+    await expect(
+      fileMove.run(fileMove.inputSchema.parse({ path: "a.png", destination: "b.png", overwrite: true }), ctx),
+    ).resolves.toBeDefined();
+  });
+
+  it("reports a missing source file clearly", async () => {
+    await expect(fileMove.run(fileMove.inputSchema.parse({ path: "nope.png", destination: "x.png" }), ctx)).rejects.toThrow(
+      /not found/,
+    );
   });
 });
 

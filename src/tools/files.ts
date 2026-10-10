@@ -212,6 +212,71 @@ export const uploadFile = defineTool({
   },
 });
 
+export const fileDelete = defineTool({
+  name: "file_delete",
+  title: "Delete file",
+  kind: "write",
+  description:
+    "Delete a file in the workspace — to clean up a test file, a temporary import, or anything " +
+    "no longer needed. Pass recursive: true to delete a non-empty folder and everything in it.",
+  inputSchema: z.object({
+    path: z.string().min(1).describe("File (or folder, with recursive: true) to delete, relative to the workspace"),
+    recursive: z.boolean().default(false).describe("Required to delete a folder and its contents"),
+  }),
+  async run(input, ctx) {
+    if (path.normalize(input.path) === ".") {
+      throw new ToolError("Refusing to delete the workspace root itself");
+    }
+    const full = resolveInWorkspace(ctx, input.path);
+    const st = await fs.stat(full).catch(() => null);
+    if (!st) throw new ToolError(`File not found: ${input.path}`);
+    if (st.isDirectory() && !input.recursive) {
+      throw new ToolError(`${input.path} is a folder — pass recursive: true to delete it and everything in it`);
+    }
+    await fs.rm(full, { recursive: input.recursive });
+    return [{ type: "text", text: `Deleted ${input.path}${st.isDirectory() ? " (folder)" : ""}` }];
+  },
+});
+
+export const fileMove = defineTool({
+  name: "file_move",
+  title: "Move / rename file",
+  kind: "write",
+  description:
+    "Move or rename a file within the workspace. Fails if the destination already exists unless " +
+    "overwrite is true.",
+  inputSchema: z.object({
+    path: z.string().min(1).describe("Existing file, relative to the workspace"),
+    destination: z.string().min(1).describe("New path, relative to the workspace"),
+    overwrite: z.boolean().default(false),
+  }),
+  async run(input, ctx) {
+    const src = resolveInWorkspace(ctx, input.path);
+    const srcStat = await fs.stat(src).catch(() => null);
+    if (!srcStat?.isFile()) throw new ToolError(`File not found: ${input.path}`);
+
+    const dest = resolveInWorkspace(ctx, input.destination);
+    if (!input.overwrite) {
+      const destExists = await fs.stat(dest).catch(() => null);
+      if (destExists) throw new ToolError(`${input.destination} already exists. Pass overwrite: true to replace it.`);
+    }
+    await fs.mkdir(path.dirname(dest), { recursive: true });
+    try {
+      await fs.rename(src, dest);
+    } catch (err) {
+      // EXDEV: source and destination are on different mounted volumes — rename()
+      // can't do that atomically, so fall back to copy + delete.
+      if ((err as NodeJS.ErrnoException).code !== "EXDEV") throw err;
+      await fs.copyFile(src, dest);
+      await fs.unlink(src);
+    }
+    return [
+      { type: "text", text: `Moved ${input.path} to ${input.destination}` },
+      ...linkLine(ctx, path.relative(ctx.workspace, dest)),
+    ];
+  },
+});
+
 export const fileLink = defineTool({
   name: "file_link",
   title: "Get download link",
@@ -227,4 +292,4 @@ export const fileLink = defineTool({
   },
 });
 
-export const fileTools = [pdfImportUrl, uploadFile, filesList, fileLink];
+export const fileTools = [pdfImportUrl, uploadFile, fileDelete, fileMove, filesList, fileLink];

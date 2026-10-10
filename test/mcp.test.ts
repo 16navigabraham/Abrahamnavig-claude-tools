@@ -26,14 +26,17 @@ describe("MCP server", () => {
     const { tools } = await client.listTools();
     const byName = Object.fromEntries(tools.map((t) => [t.name, t]));
     expect(Object.keys(byName).sort()).toEqual([
+      "csv_create",
       "file_link",
       "files_list",
+      "image_edit",
       "pdf_create",
       "pdf_import_url",
       "pdf_info",
       "pdf_merge",
       "pdf_read",
       "pdf_view",
+      "qr_create",
       "upload_file",
     ]);
     expect(byName.pdf_read.annotations?.readOnlyHint).toBe(true);

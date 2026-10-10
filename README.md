@@ -9,16 +9,26 @@ PDF tools for Claude. One set of tool definitions is exposed two ways:
 
 | Tool | Kind | What it does |
 |---|---|---|
-| `pdf_create` | write | Build a PDF from text with `#`/`##` headings, `-` bullets and paragraphs. Pages are added automatically |
+| `pdf_create` | write | Build a PDF from text with `#`/`##` headings, `-` bullets, paragraphs and `![alt](path)` images. Pages are added automatically |
 | `pdf_read` | read | Extract text page by page, with an optional page range |
 | `pdf_info` | read | Page count, page size, file size and metadata |
 | `pdf_view` | read | Hand the PDF itself to Claude so it sees layout, tables and scanned pages |
 | `pdf_merge` | write | Combine PDFs in order into a new file |
 | `pdf_import_url` | write | Download a PDF from a public URL into the workspace (max 32 MB). It won't fetch from private or internal addresses |
+| `upload_file` | write | Save a file (usually an image) into the workspace from base64 data, to reference from `pdf_create` |
 | `files_list` | read | List the files in the workspace |
 | `file_link` | read | Get a time-limited download link for a file (online only) |
 
-When the server runs online, `pdf_create`, `pdf_merge` and `pdf_import_url` include a download link in their result.
+When the server runs online, `pdf_create`, `pdf_merge`, `pdf_import_url` and `upload_file` include a download link in their result.
+
+**Images in a created PDF:** `pdf_create` only renders PNG/JPEG images it can find in the workspace — it can't fetch or generate them. Upload the image first with `upload_file`, then reference that same path from `content` using standard Markdown image syntax on its own line:
+
+```
+upload_file(path: "assets/logo.png", data: "<base64>")
+pdf_create(path: "report.pdf", content: "# Report\n\n![Company logo](assets/logo.png)\n\nBody text...")
+```
+
+An image is scaled down to fit the page (never upscaled) and starts a new page if it doesn't fit on the current one. A referenced image that wasn't uploaded fails the whole call with a clear error, before anything is written.
 
 All paths are relative to a **workspace** directory (`CLAUDE_TOOLS_WORKSPACE`, default `./workspace`). Paths that escape it are rejected. Write tools never replace an existing file unless `overwrite: true` is passed.
 

@@ -34,6 +34,7 @@ describe("MCP server", () => {
       "pdf_merge",
       "pdf_read",
       "pdf_view",
+      "upload_file",
     ]);
     expect(byName.pdf_read.annotations?.readOnlyHint).toBe(true);
     expect(byName.pdf_create.annotations?.readOnlyHint).toBe(false);

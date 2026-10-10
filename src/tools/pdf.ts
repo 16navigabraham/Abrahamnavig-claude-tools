@@ -24,12 +24,27 @@ type Block =
   | { kind: "h1"; text: string }
   | { kind: "h2"; text: string }
   | { kind: "li"; text: string }
+  // Standard Markdown image syntax, on its own line: ![alt](workspace-relative-path).
+  // The path is looked up in the `images` map passed to buildPdf.
+  | { kind: "img"; alt: string; path: string }
   // A paragraph is its own input lines, not one joined string: a single line
   // break stays a line break (drawn as a forced break), a blank line starts a
   // new paragraph (drawn with the usual gap after).
   | { kind: "p"; lines: string[] };
 
-/** Parse a small Markdown subset: `#`/`##` headings, `-`/`*` bullets, blank-line paragraphs. */
+const IMAGE_LINE = /^!\[([^\]]*)\]\(([^)]+)\)$/;
+
+/** Every image path referenced in `content`, e.g. to pre-fetch before calling buildPdf. */
+export function imagePaths(content: string): string[] {
+  const paths = new Set<string>();
+  for (const raw of content.replace(/\r\n?/g, "\n").split("\n")) {
+    const m = IMAGE_LINE.exec(raw.trim());
+    if (m) paths.add(m[2]);
+  }
+  return [...paths];
+}
+
+/** Parse a small Markdown subset: `#`/`##` headings, `-`/`*` bullets, `![alt](path)` images, blank-line paragraphs. */
 export function parseBlocks(content: string): Block[] {
   const blocks: Block[] = [];
   let para: string[] = [];
@@ -39,6 +54,7 @@ export function parseBlocks(content: string): Block[] {
   };
   for (const raw of content.replace(/\r\n?/g, "\n").split("\n")) {
     const line = raw.trim();
+    const imgMatch = IMAGE_LINE.exec(line);
     if (!line) {
       flush();
     } else if (line.startsWith("## ")) {
@@ -50,6 +66,9 @@ export function parseBlocks(content: string): Block[] {
     } else if (/^[-*] /.test(line)) {
       flush();
       blocks.push({ kind: "li", text: line.slice(2).trim() });
+    } else if (imgMatch) {
+      flush();
+      blocks.push({ kind: "img", alt: imgMatch[1], path: imgMatch[2] });
     } else {
       para.push(line);
     }
@@ -92,17 +111,28 @@ function wrap(font: PDFFont, size: number, text: string, width: number): string[
   return lines;
 }
 
+function sniffImageFormat(bytes: Uint8Array): "png" | "jpg" | null {
+  if (bytes.length >= 8 && bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4e && bytes[3] === 0x47) {
+    return "png";
+  }
+  if (bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) return "jpg";
+  return null;
+}
+
 export async function buildPdf(opts: {
   title?: string;
   author?: string;
   content: string;
   pageSize: keyof typeof PAGE_SIZES;
+  /** Image bytes keyed by the exact path used in `![alt](path)` within content. */
+  images?: Record<string, Uint8Array>;
 }): Promise<{ bytes: Uint8Array; unsupportedChars: number }> {
   const doc = await PDFDocument.create();
   const regular = await doc.embedFont(StandardFonts.Helvetica);
   const bold = await doc.embedFont(StandardFonts.HelveticaBold);
   const [pageW, pageH] = PAGE_SIZES[opts.pageSize];
   const textW = pageW - MARGIN * 2;
+  const images = opts.images ?? {};
 
   if (opts.title) doc.setTitle(opts.title);
   if (opts.author) doc.setAuthor(opts.author);
@@ -125,11 +155,33 @@ export async function buildPdf(opts: {
     y -= gapAfter;
   };
 
+  const drawImage = async (alt: string, path: string) => {
+    const bytes = images[path];
+    const format = bytes && sniffImageFormat(bytes);
+    if (!bytes) return draw(`[image not found: ${path}]`, regular, 10, 0, 8);
+    if (!format) return draw(`[${path}: not a PNG or JPEG image]`, regular, 10, 0, 8);
+    const embedded = format === "png" ? await doc.embedPng(bytes) : await doc.embedJpg(bytes);
+    const maxW = textW;
+    const maxH = pageH - MARGIN * 2; // never require more than one full page
+    const scale = Math.min(maxW / embedded.width, maxH / embedded.height, 1); // never upscale
+    const w = embedded.width * scale;
+    const h = embedded.height * scale;
+    if (y - h < MARGIN) {
+      page = doc.addPage([pageW, pageH]);
+      y = pageH - MARGIN;
+    }
+    y -= h;
+    page.drawImage(embedded, { x: MARGIN, y, width: w, height: h });
+    y -= 8;
+    if (alt) draw(alt, regular, 9, 0, 8);
+  };
+
   if (opts.title) draw(opts.title, bold, 22, 0, 14);
   for (const block of parseBlocks(opts.content)) {
     if (block.kind === "h1") draw(block.text, bold, 17, 0, 8);
     else if (block.kind === "h2") draw(block.text, bold, 14, 0, 6);
     else if (block.kind === "li") draw(`• ${block.text}`, regular, 11, 12, 3);
+    else if (block.kind === "img") await drawImage(block.alt, block.path);
     else {
       // Each input line is its own forced break; only the paragraph's last
       // line gets the normal gap-after, so lines within it stay tight.
@@ -150,8 +202,10 @@ export const pdfCreate = defineTool({
   kind: "write",
   description:
     "Create a new PDF from text. `content` supports a small Markdown subset: lines starting with " +
-    "'# ' or '## ' are headings, '- ' are bullets, and blank lines separate paragraphs. Only " +
-    "Latin characters render; others are replaced with '?'. Fails if the file exists unless overwrite is true.",
+    "'# ' or '## ' are headings, '- ' are bullets, blank lines separate paragraphs, and " +
+    "'![alt](path)' on its own line embeds a PNG/JPEG image — upload it into the workspace with " +
+    "upload_file first, then reference it by that same path. Only Latin characters render in text; " +
+    "others are replaced with '?'. Fails if the file exists unless overwrite is true.",
   inputSchema: z.object({
     path: pdfPath,
     title: z.string().optional().describe("Shown as the first heading and stored as document metadata"),
@@ -161,11 +215,16 @@ export const pdfCreate = defineTool({
     overwrite: z.boolean().default(false),
   }),
   async run(input, ctx) {
+    const images: Record<string, Uint8Array> = {};
+    for (const imgPath of imagePaths(input.content)) {
+      images[imgPath] = await readWorkspaceFile(ctx, imgPath);
+    }
     const { bytes, unsupportedChars } = await buildPdf({
       title: input.title,
       author: input.author,
       content: input.content,
       pageSize: input.page_size,
+      images,
     });
     const saved = await writeWorkspaceFile(ctx, input.path, bytes, input.overwrite);
     const pages = (await PDFDocument.load(bytes)).getPageCount();

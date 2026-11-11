@@ -34,12 +34,15 @@ type Block =
   // GFM-style pipe table: a header row, a |---|---| separator (colons set
   // alignment), then zero or more body rows, each starting and ending with |.
   | { kind: "table"; header: string[]; align: Align[]; rows: string[][] }
+  // A line that is exactly `\pagebreak` forces the next block onto a new page.
+  | { kind: "pagebreak" }
   // A paragraph is its own input lines, not one joined string: a single line
   // break stays a line break (drawn as a forced break), a blank line starts a
   // new paragraph (drawn with the usual gap after).
   | { kind: "p"; lines: string[] };
 
 const IMAGE_LINE = /^!\[([^\]]*)\]\(([^)]+)\)$/;
+const PAGE_BREAK = "\\pagebreak";
 const TABLE_ROW = /^\|.+\|$/;
 const TABLE_SEPARATOR_CELL = /^:?-+:?$/;
 
@@ -98,6 +101,10 @@ export function parseBlocks(content: string): Block[] {
     const imgMatch = IMAGE_LINE.exec(line);
     if (!line) {
       flush();
+      i++;
+    } else if (line === PAGE_BREAK) {
+      flush();
+      blocks.push({ kind: "pagebreak" });
       i++;
     } else if (line.startsWith("## ")) {
       flush();
@@ -170,6 +177,51 @@ function wrap(font: PDFFont, size: number, text: string, width: number): string[
   return lines;
 }
 
+/** Cells narrower than this fraction of the table are kept on one line when the table allows it. */
+const SHORT_CELL_FRACTION = 0.2;
+
+/**
+ * Column widths for a table, sized to content instead of split evenly: each column
+ * wants its widest cell on one line (`natural`) and can't usefully go below its
+ * longest word, or below a short cell's full width (`min`). If every column fits on
+ * one line, the spare width is shared out in proportion; otherwise each column gets
+ * its minimum plus a share of the remaining width in proportion to how much it would
+ * still need to stop wrapping. `cellWidth` measures one cell's text (bold for the
+ * header row) without padding.
+ */
+export function tableColumnWidths(
+  rows: string[][],
+  cellWidth: (text: string, rowIndex: number) => number,
+  totalW: number,
+  padX: number,
+): number[] {
+  const cols = rows[0]?.length ?? 0;
+  const natural = new Array<number>(cols).fill(0);
+  const min = new Array<number>(cols).fill(0);
+  rows.forEach((row, r) => {
+    for (let c = 0; c < cols; c++) {
+      const text = row[c] ?? "";
+      const full = cellWidth(text, r) + padX * 2;
+      natural[c] = Math.max(natural[c], full);
+      // A short cell (a number, a header like "Cost (NGN)") shouldn't wrap at all;
+      // a long one may wrap down to its longest word.
+      if (full <= totalW * SHORT_CELL_FRACTION) min[c] = Math.max(min[c], full);
+      for (const word of text.split(/\s+/).filter(Boolean)) {
+        min[c] = Math.max(min[c], cellWidth(word, r) + padX * 2);
+      }
+    }
+  });
+  const sum = (xs: number[]) => xs.reduce((a, b) => a + b, 0);
+  const sumNatural = sum(natural);
+  if (sumNatural === 0) return new Array<number>(cols).fill(totalW / cols);
+  if (sumNatural <= totalW) return natural.map((w) => (w / sumNatural) * totalW);
+  const sumMin = sum(min);
+  if (sumMin >= totalW) return min.map((w) => (w / sumMin) * totalW);
+  const need = natural.map((w, c) => w - min[c]);
+  const sumNeed = sum(need);
+  return min.map((w, c) => w + ((totalW - sumMin) * need[c]) / sumNeed);
+}
+
 function sniffImageFormat(bytes: Uint8Array): "png" | "jpg" | null {
   if (bytes.length >= 8 && bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4e && bytes[3] === 0x47) {
     return "png";
@@ -198,105 +250,171 @@ export async function buildPdf(opts: {
   doc.setProducer("abrahamnavig-claude-tools");
 
   let page: PDFPage = doc.addPage([pageW, pageH]);
-  let y = pageH - MARGIN;
+  const TOP = pageH - MARGIN;
+  let y = TOP;
   const stats = { replaced: 0 };
+
+  const newPage = () => {
+    page = doc.addPage([pageW, pageH]);
+    y = TOP;
+  };
+  /** Start a new page unless `h` points still fit (or the page is already fresh). */
+  const ensureSpace = (h: number) => {
+    if (y - h < MARGIN && y < TOP) newPage();
+  };
+
+  const textLines = (text: string, font: PDFFont, size: number, indent = 0) =>
+    wrap(font, size, encodable(font, text, stats), textW - indent);
 
   const draw = (text: string, font: PDFFont, size: number, indent = 0, gapAfter = 6) => {
     const lineH = size * 1.35;
-    for (const line of wrap(font, size, encodable(font, text, stats), textW - indent)) {
-      if (y - lineH < MARGIN) {
-        page = doc.addPage([pageW, pageH]);
-        y = pageH - MARGIN;
-      }
+    for (const line of textLines(text, font, size, indent)) {
+      if (y - lineH < MARGIN) newPage();
       y -= lineH;
       page.drawText(line, { x: MARGIN + indent, y, size, font, color: rgb(0.1, 0.1, 0.1) });
     }
     y -= gapAfter;
   };
 
-  const drawImage = async (alt: string, path: string) => {
-    const bytes = images[path];
-    const format = bytes && sniffImageFormat(bytes);
-    if (!bytes) return draw(`[image not found: ${path}]`, regular, 10, 0, 8);
-    if (!format) return draw(`[${path}: not a PNG or JPEG image]`, regular, 10, 0, 8);
-    const embedded = format === "png" ? await doc.embedPng(bytes) : await doc.embedJpg(bytes);
-    const maxW = textW;
-    const maxH = pageH - MARGIN * 2; // never require more than one full page
-    const scale = Math.min(maxW / embedded.width, maxH / embedded.height, 1); // never upscale
-    const w = embedded.width * scale;
-    const h = embedded.height * scale;
-    if (y - h < MARGIN) {
-      page = doc.addPage([pageW, pageH]);
-      y = pageH - MARGIN;
-    }
+  // Embed every referenced image up front, so its size is known when deciding
+  // whether a heading above it still fits on the current page.
+  type Embedded = Awaited<ReturnType<typeof doc.embedPng>>;
+  const embedded = new Map<string, Embedded | null>();
+  for (const [imgPath, bytes] of Object.entries(images)) {
+    const format = sniffImageFormat(bytes);
+    embedded.set(imgPath, format === "png" ? await doc.embedPng(bytes) : format === "jpg" ? await doc.embedJpg(bytes) : null);
+  }
+  const imageSize = (img: Embedded) => {
+    const scale = Math.min(textW / img.width, (pageH - MARGIN * 2) / img.height, 1); // never upscale
+    return { w: img.width * scale, h: img.height * scale };
+  };
+
+  const drawImage = (alt: string, path: string) => {
+    const img = embedded.get(path);
+    if (!images[path]) return draw(`[image not found: ${path}]`, regular, 10, 0, 8);
+    if (!img) return draw(`[${path}: not a PNG or JPEG image]`, regular, 10, 0, 8);
+    const { w, h } = imageSize(img);
+    ensureSpace(h);
     y -= h;
-    page.drawImage(embedded, { x: MARGIN, y, width: w, height: h });
+    page.drawImage(img, { x: MARGIN, y, width: w, height: h });
     y -= 8;
     if (alt) draw(alt, regular, 9, 0, 8);
   };
 
   const TABLE_FONT_SIZE = 9;
+  const TABLE_LINE_H = TABLE_FONT_SIZE * 1.3;
   const CELL_PAD_X = 4;
   const CELL_PAD_Y = 4;
   const BORDER = rgb(0.7, 0.7, 0.7);
   const HEADER_FILL = rgb(0.92, 0.92, 0.92);
 
-  const drawTable = (header: string[], align: Align[], bodyRows: string[][]) => {
+  /** Column widths plus each row's wrapped cell lines and height; row 0 is the header. */
+  const layoutTable = (header: string[], bodyRows: string[][]) => {
     const cols = header.length;
-    if (cols === 0) return;
-    const colW = textW / cols;
     const rows = [header, ...bodyRows.map((r) => Array.from({ length: cols }, (_, c) => r[c] ?? ""))];
+    const fontFor = (r: number) => (r === 0 ? bold : regular);
+    const colW = tableColumnWidths(
+      rows,
+      (text, r) => fontFor(r).widthOfTextAtSize(encodable(fontFor(r), text, { replaced: 0 }), TABLE_FONT_SIZE),
+      textW,
+      CELL_PAD_X,
+    );
+    const laidOut = rows.map((row, r) => {
+      const font = fontFor(r);
+      const lines = row.map((cell, c) => wrap(font, TABLE_FONT_SIZE, encodable(font, cell, stats), colW[c] - CELL_PAD_X * 2));
+      const height = Math.max(1, ...lines.map((l) => l.length)) * TABLE_LINE_H + CELL_PAD_Y * 2;
+      return { font, lines, height };
+    });
+    return { colW, rows: laidOut };
+  };
 
-    rows.forEach((row, rowIndex) => {
-      const isHeader = rowIndex === 0;
-      const font = isHeader ? bold : regular;
-      const lineH = TABLE_FONT_SIZE * 1.3;
-      const cellLines = row.map((cell) => wrap(font, TABLE_FONT_SIZE, encodable(font, cell, stats), colW - CELL_PAD_X * 2));
-      const rowH = Math.max(1, ...cellLines.map((l) => l.length)) * lineH + CELL_PAD_Y * 2;
+  const drawTable = (header: string[], align: Align[], bodyRows: string[][]) => {
+    if (header.length === 0) return;
+    const { colW, rows } = layoutTable(header, bodyRows);
 
-      if (y - rowH < MARGIN) {
-        page = doc.addPage([pageW, pageH]);
-        y = pageH - MARGIN;
-      }
+    const drawRow = (row: (typeof rows)[number], isHeader: boolean) => {
       const rowTop = y;
+      const rowH = row.height;
       if (isHeader) {
         page.drawRectangle({ x: MARGIN, y: rowTop - rowH, width: textW, height: rowH, color: HEADER_FILL });
       }
-      cellLines.forEach((lines, c) => {
-        const cellX = MARGIN + c * colW;
-        page.drawRectangle({ x: cellX, y: rowTop - rowH, width: colW, height: rowH, borderColor: BORDER, borderWidth: 0.5 });
+      let cellX = MARGIN;
+      row.lines.forEach((lines, c) => {
+        const w0 = colW[c];
+        page.drawRectangle({ x: cellX, y: rowTop - rowH, width: w0, height: rowH, borderColor: BORDER, borderWidth: 0.5 });
         lines.forEach((line, li) => {
-          const lineY = rowTop - CELL_PAD_Y - (li + 1) * lineH + (lineH - TABLE_FONT_SIZE) / 2;
-          const w = font.widthOfTextAtSize(line, TABLE_FONT_SIZE);
+          const lineY = rowTop - CELL_PAD_Y - (li + 1) * TABLE_LINE_H + (TABLE_LINE_H - TABLE_FONT_SIZE) / 2;
+          const w = row.font.widthOfTextAtSize(line, TABLE_FONT_SIZE);
           const cellAlign = align[c] ?? "left";
           const x =
             cellAlign === "center"
-              ? cellX + (colW - w) / 2
+              ? cellX + (w0 - w) / 2
               : cellAlign === "right"
-                ? cellX + colW - CELL_PAD_X - w
+                ? cellX + w0 - CELL_PAD_X - w
                 : cellX + CELL_PAD_X;
-          page.drawText(line, { x, y: lineY, size: TABLE_FONT_SIZE, font, color: rgb(0.1, 0.1, 0.1) });
+          page.drawText(line, { x, y: lineY, size: TABLE_FONT_SIZE, font: row.font, color: rgb(0.1, 0.1, 0.1) });
         });
+        cellX += w0;
       });
       y = rowTop - rowH;
-    });
+    };
+
+    // Never leave the header alone at the bottom of a page: it moves with the first body row.
+    const [headerRow, ...body] = rows;
+    ensureSpace(headerRow.height + (body[0]?.height ?? 0));
+    drawRow(headerRow, true);
+    for (const row of body) {
+      if (y - row.height < MARGIN) {
+        // Continue on a new page and repeat the header so the columns stay labelled.
+        newPage();
+        drawRow(headerRow, true);
+      }
+      drawRow(row, false);
+    }
     y -= 8;
   };
 
+  /** Height of the start of a block: what a heading above it needs alongside it on the same page. */
+  const leadHeight = (block: Block | undefined): number => {
+    if (!block) return 0;
+    if (block.kind === "p" || block.kind === "li") return 11 * 1.35;
+    if (block.kind === "table") {
+      if (block.header.length === 0) return 0;
+      const { rows } = layoutTable(block.header, block.rows.slice(0, 1));
+      return rows.reduce((h, r) => h + r.height, 0);
+    }
+    if (block.kind === "img") {
+      const img = embedded.get(block.path);
+      return img ? imageSize(img).h : 10 * 1.35;
+    }
+    return 0; // headings and page breaks don't pull anything along
+  };
+
+  const heading = (text: string, size: number, gapAfter: number, next: Block | undefined) => {
+    const h = textLines(text, bold, size).length * size * 1.35 + gapAfter + leadHeight(next);
+    // Keep the heading with the start of what follows it, unless that alone won't fit on a page.
+    if (h <= pageH - MARGIN * 2) ensureSpace(h);
+    draw(text, bold, size, 0, gapAfter);
+  };
+
   if (opts.title) draw(opts.title, bold, 22, 0, 14);
-  for (const block of parseBlocks(opts.content)) {
-    if (block.kind === "h1") draw(block.text, bold, 17, 0, 8);
-    else if (block.kind === "h2") draw(block.text, bold, 14, 0, 6);
-    else if (block.kind === "li") draw(`• ${block.text}`, regular, 11, 12, 3);
-    else if (block.kind === "img") await drawImage(block.alt, block.path);
+  const blocks = parseBlocks(opts.content);
+  blocks.forEach((block, i) => {
+    const next = blocks[i + 1];
+    if (block.kind === "h1") heading(block.text, 17, 8, next);
+    else if (block.kind === "h2") heading(block.text, 14, 6, next);
+    else if (block.kind === "pagebreak") {
+      if (y < TOP) newPage(); // a break at the top of a fresh page would only add a blank page
+    } else if (block.kind === "li") draw(`• ${block.text}`, regular, 11, 12, 3);
+    else if (block.kind === "img") drawImage(block.alt, block.path);
     else if (block.kind === "table") drawTable(block.header, block.align, block.rows);
     else {
       // Each input line is its own forced break; only the paragraph's last
       // line gets the normal gap-after, so lines within it stay tight.
       const { lines } = block;
-      lines.forEach((line, i) => draw(line, regular, 11, 0, i === lines.length - 1 ? 8 : 0));
+      lines.forEach((line, li) => draw(line, regular, 11, 0, li === lines.length - 1 ? 8 : 0));
     }
-  }
+  });
 
   return { bytes: await doc.save(), unsupportedChars: stats.replaced };
 }
@@ -314,7 +432,9 @@ export const pdfCreate = defineTool({
     "on its own line embeds a PNG/JPEG image (upload it into the workspace with upload_file first, " +
     "then reference that same path), and a GFM-style pipe table (a header row, a |---|---| " +
     "separator — ':---'/'---:'/':---:' set column alignment — then body rows) renders as a real " +
-    "bordered table. Only Latin characters render in text; others are replaced with '?'. Fails if " +
+    "bordered table with columns sized to their content. A line that is exactly '\\pagebreak' starts " +
+    "a new page; headings are kept on the same page as what follows them. Only Latin characters " +
+    "render in text; others are replaced with '?'. Fails if " +
     "the file exists unless overwrite is true.",
   inputSchema: z.object({
     path: pdfPath,

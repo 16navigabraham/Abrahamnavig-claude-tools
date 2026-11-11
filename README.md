@@ -9,7 +9,7 @@ Document, image, QR and data tools for Claude. One set of tool definitions is ex
 
 | Tool | Kind | What it does |
 |---|---|---|
-| `pdf_create` | write | Build a PDF from text with `#`/`##` headings, `-` bullets, paragraphs, `![alt](path)` images and GFM-style pipe tables. Pages are added automatically |
+| `pdf_create` | write | Build a PDF from text with `#`/`##` headings, `-` bullets, paragraphs, `![alt](path)` images, GFM-style pipe tables and `\pagebreak`. Pages are added automatically |
 | `pdf_read` | read | Extract text page by page, with an optional page range |
 | `pdf_info` | read | Page count, page size, file size and metadata |
 | `pdf_view` | read | Hand the PDF itself to Claude so it sees layout, tables and scanned pages |
@@ -47,7 +47,9 @@ An image is scaled down to fit the page (never upscaled) and starts a new page i
 | Interswitch | 2% |
 ```
 
-The separator row's colons set column alignment (`:---` left, `---:` right, `:---:` center; plain `---` defaults to left). A row longer than the header is truncated, a shorter one is padded with blank cells. A tall table breaks across pages like everything else.
+The separator row's colons set column alignment (`:---` left, `---:` right, `:---:` center; plain `---` defaults to left). A row longer than the header is truncated, a shorter one is padded with blank cells. Columns are sized to their content: a long description column gets the room, and number columns stay on one line where they can. A tall table breaks across pages and repeats its header row on each new page, and the header never sits alone at the bottom of a page.
+
+**Page breaks in a created PDF:** a line that is exactly `\pagebreak` starts a new page (ignored at the top of a page that is already empty). Headings are kept on the same page as the start of what follows them, so a heading never ends up alone at the bottom of a page.
 
 **`ocr_extract`:** upload an image with `upload_file`, then run OCR on it — for a scanned certificate, an ID card, a BVN slip, anything with no real text layer. English only right now. The first call after the server starts is slow (a few seconds) while it downloads and loads the language model from the internet; every call after that reuses the same loaded model and is fast. A redeploy or restart re-downloads it once.
 

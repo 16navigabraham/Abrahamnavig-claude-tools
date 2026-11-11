@@ -151,6 +151,10 @@ git pull && bash deploy/update.sh               # update by hand (rebuilds, rest
 docker compose down                             # stop (files are kept in the "workspace" volume)
 ```
 
+- Everyone with the token shares one workspace. For per-user files, give each user their own token and workspace, or add OAuth.
+- The endpoint is rate-limited to 120 requests per minute per IP.
+- Download links expire after `FILE_LINK_TTL_SECONDS` (default 24 hours). Changing `MCP_AUTH_TOKEN` invalidates all existing links.
+
 ### Automatic deploys (GitHub Actions)
 
 - **Every pull request** runs `.github/workflows/ci.yml`: typecheck, tests and a Docker build.
@@ -162,35 +166,27 @@ docker compose down                             # stop (files are kept in the "w
 - **Left alone:** `.env`, the workspace files and the HTTPS certificate are never touched.
 - **Redeploy without a new commit:** use **Actions → Deploy → Run workflow**.
 
-One-time setup, after `setup-oracle.sh` has run once:
+The server's IP, SSH user, host key and app folder are set at the top of `deploy.yml`; none of them are secret. The only secret is the SSH key GitHub logs in with. One-time setup:
 
-1. **On the VM**, create a key that GitHub will use to log in, and print what the secrets need:
+1. **On the VM**, create the key and allow it to log in:
    ```bash
    ssh-keygen -t ed25519 -N "" -C github-actions-deploy -f ~/.ssh/github_deploy
    cat ~/.ssh/github_deploy.pub >> ~/.ssh/authorized_keys
-   cat ~/.ssh/github_deploy                                    # -> ORACLE_SSH_KEY
-   echo "$(curl -fsS https://api.ipify.org) $(cut -d' ' -f1,2 /etc/ssh/ssh_host_ed25519_key.pub)"   # -> ORACLE_KNOWN_HOSTS
+   cat ~/.ssh/github_deploy
    ```
-2. **On GitHub**, open the repo's **Settings → Secrets and variables → Actions** and add these repository secrets:
-
-   | Secret | Value |
-   |---|---|
-   | `ORACLE_HOST` | the VM's public IP |
-   | `ORACLE_USER` | the SSH user, usually `ubuntu` |
-   | `ORACLE_SSH_KEY` | the whole private key printed above, including the `BEGIN`/`END` lines |
-   | `ORACLE_KNOWN_HOSTS` | the `<ip> ssh-ed25519 ...` line printed above |
-
-   If the repo isn't cloned at `~/Abrahamnavig-claude-tools` on the VM, also add a repository variable `ORACLE_APP_DIR` with its path.
+2. **On GitHub**, open the repo's **Settings → Secrets and variables → Actions** and add one repository secret, `DEPLOY_SSH_KEY`. Paste the whole private key printed above, including the `BEGIN`/`END` lines.
 3. **Back on the VM**, delete the private key file. GitHub has its copy, and the public half stays in `authorized_keys`:
    ```bash
    rm ~/.ssh/github_deploy
    ```
 
-The deploy job runs in a GitHub environment called `production`. GitHub creates it on the first run. To require your approval before each deploy, add yourself as a required reviewer under **Settings → Environments → production**.
+If the VM changes, update `SERVER_IP` and `SERVER_HOST_KEY` in `deploy.yml`. Print the host-key line on the VM with:
 
-- Everyone with the token shares one workspace. For per-user files, give each user their own token and workspace, or add OAuth.
-- The endpoint is rate-limited to 120 requests per minute per IP.
-- Download links expire after `FILE_LINK_TTL_SECONDS` (default 24 hours). Changing `MCP_AUTH_TOKEN` invalidates all existing links.
+```bash
+echo "$(curl -fsS https://api.ipify.org) $(cut -d' ' -f1,2 /etc/ssh/ssh_host_ed25519_key.pub)"
+```
+
+The deploy job runs in a GitHub environment called `production`. GitHub creates it on the first run. To require your approval before each deploy, add yourself as a required reviewer under **Settings → Environments → production**.
 
 ## Adding tools
 

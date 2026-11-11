@@ -1,13 +1,9 @@
 name: Deploy
 
 # Every push to main is tested, then deployed to the Oracle Cloud VM over SSH.
-# Needs these repository secrets (Settings > Secrets and variables > Actions):
-#   ORACLE_HOST         the VM's public IP or hostname
-#   ORACLE_USER         the SSH user, e.g. ubuntu
-#   ORACLE_SSH_KEY      a private key whose public half is in the VM's ~/.ssh/authorized_keys
-#   ORACLE_KNOWN_HOSTS  output of `ssh-keyscan -t ed25519 <ORACLE_HOST>`, so the VM is verified
-# Optional repository variable:
-#   ORACLE_APP_DIR      where the repo is cloned on the VM (default: ~/Abrahamnavig-claude-tools)
+# One repository secret is needed (Settings > Secrets and variables > Actions):
+#   DEPLOY_SSH_KEY  a private key whose public half is in the VM's ~/.ssh/authorized_keys
+# The server's address, user, host key and app folder are not secret, so they live below.
 
 on:
   push:
@@ -22,6 +18,14 @@ concurrency:
   group: deploy-oracle
   cancel-in-progress: false
 
+env:
+  SERVER_IP: 145.241.232.214
+  SERVER_USER: ubuntu
+  # The VM's SSH host key, so the deploy only ever talks to this server. Print it on the VM with:
+  #   echo "$(curl -fsS https://api.ipify.org) $(cut -d' ' -f1,2 /etc/ssh/ssh_host_ed25519_key.pub)"
+  SERVER_HOST_KEY: ""
+  APP_DIR: ~/Abrahamnavig-claude-tools
+
 jobs:
   test:
     uses: ./.github/workflows/ci.yml
@@ -34,24 +38,24 @@ jobs:
     steps:
       - name: Set up SSH
         env:
-          SSH_KEY: ${{ secrets.ORACLE_SSH_KEY }}
-          KNOWN_HOSTS: ${{ secrets.ORACLE_KNOWN_HOSTS }}
+          SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
         run: |
-          if [ -z "$SSH_KEY" ] || [ -z "$KNOWN_HOSTS" ]; then
-            echo "::error::Set the ORACLE_SSH_KEY and ORACLE_KNOWN_HOSTS secrets (see the comment at the top of deploy.yml)."
+          if [ -z "$SSH_KEY" ]; then
+            echo "::error::Add the DEPLOY_SSH_KEY repository secret (see the README's Automatic deploys section)."
+            exit 1
+          fi
+          if [ -z "$SERVER_HOST_KEY" ]; then
+            echo "::error::Fill in SERVER_HOST_KEY at the top of .github/workflows/deploy.yml."
             exit 1
           fi
           install -m 700 -d ~/.ssh
           printf '%s\n' "$SSH_KEY" > ~/.ssh/deploy_key
           chmod 600 ~/.ssh/deploy_key
-          printf '%s\n' "$KNOWN_HOSTS" > ~/.ssh/known_hosts
+          printf '%s\n' "$SERVER_HOST_KEY" > ~/.ssh/known_hosts
 
       - name: Deploy ${{ github.sha }}
         env:
-          HOST: ${{ secrets.ORACLE_HOST }}
-          USER: ${{ secrets.ORACLE_USER }}
-          APP_DIR: ${{ vars.ORACLE_APP_DIR || '~/Abrahamnavig-claude-tools' }}
           SHA: ${{ github.sha }}
         run: |
-          ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=yes -o BatchMode=yes "$USER@$HOST" \
+          ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=yes -o BatchMode=yes "$SERVER_USER@$SERVER_IP" \
             "set -e; cd $APP_DIR && git fetch --quiet origin main && git reset --quiet --hard && git checkout --quiet -B main $SHA && bash deploy/update.sh"

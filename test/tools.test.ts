@@ -14,7 +14,9 @@ import {
   pdfSearch,
   pdfSplit,
   pdfView,
+  tableColumnWidths,
 } from "../src/tools/pdf.js";
+import { extractText, getDocumentProxy } from "unpdf";
 import { fileDelete, fileMove, uploadFile } from "../src/tools/files.js";
 import type { ToolContext } from "../src/tools/types.js";
 
@@ -80,6 +82,36 @@ describe("parseBlocks", () => {
   });
 });
 
+describe("tableColumnWidths", () => {
+  // One unit of width per character keeps the arithmetic readable.
+  const measure = (text: string) => text.length;
+
+  it("sizes columns to content and fills the full width when everything fits on one line", () => {
+    const widths = tableColumnWidths([["Item", "Cost"], ["A long description", "500"]], measure, 100, 0);
+    expect(widths.reduce((a, b) => a + b, 0)).toBeCloseTo(100);
+    expect(widths[0]).toBeGreaterThan(widths[1] * 3); // 18 chars vs 4, not an even split
+  });
+
+  it("gives a wide text column the room and keeps number columns from wrapping", () => {
+    const rows = [
+      ["Item", "Cost (NGN)", "Balance After (NGN)"],
+      ["Mac Studio M5 Max, 128 GB unified memory, bought abroad and carried in luggage", "6,987,000", "3,759,000"],
+    ];
+    const widths = tableColumnWidths(rows, measure, 60, 1);
+    expect(widths.reduce((a, b) => a + b, 0)).toBeCloseTo(60);
+    // Each number column keeps at least its longest word plus padding.
+    expect(widths[1]).toBeGreaterThanOrEqual("6,987,000".length + 2);
+    expect(widths[2]).toBeGreaterThanOrEqual("Balance".length + 2);
+    expect(widths[0]).toBeGreaterThan(widths[1]);
+  });
+
+  it("falls back to shrinking minimum widths proportionally when even those don't fit", () => {
+    const widths = tableColumnWidths([["Supercalifragilistic", "Antidisestablishment"]], measure, 20, 0);
+    expect(widths.reduce((a, b) => a + b, 0)).toBeCloseTo(20);
+    expect(widths[0]).toBeCloseTo(10);
+  });
+});
+
 describe("pdf tools", () => {
   it("creates a PDF that can be read back", async () => {
     const [res] = await create("out/hello.pdf", "# Intro\nHello from Claude\n\n- first point", {
@@ -136,6 +168,39 @@ describe("pdf tools", () => {
     const { bytes } = await buildPdf({ content: md, pageSize: "A4" });
     const doc = await PDFDocument.load(bytes);
     expect(doc.getPageCount()).toBeGreaterThan(1);
+  });
+
+  it("forces a new page at a \\pagebreak line, without adding a blank page at the top", async () => {
+    const pages = async (content: string) =>
+      (await PDFDocument.load((await buildPdf({ content, pageSize: "A4" })).bytes)).getPageCount();
+    expect(await pages("one\n\n\\pagebreak\n\ntwo")).toBe(2);
+    expect(await pages("\\pagebreak\n\nonly page")).toBe(1);
+    expect(parseBlocks("a\n\\pagebreak\nb")).toEqual([
+      { kind: "p", lines: ["a"] },
+      { kind: "pagebreak" },
+      { kind: "p", lines: ["b"] },
+    ]);
+  });
+
+  it("keeps a heading on the same page as the table that follows it", async () => {
+    // 46 lines leave ~39pt on page 1: room for the heading alone (~25pt) but not
+    // the heading plus the table's header and first row (~64pt).
+    const filler = Array.from({ length: 46 }, (_, i) => `Filler line ${i}`).join("\n");
+    const table = "| Item | Amount |\n|---|---:|\n| Locked | 450,000 |\n| Free | 361,000 |";
+    const { bytes } = await buildPdf({ content: `${filler}\n\n## Monthly Lock\n\n${table}`, pageSize: "A4" });
+    const { text } = await extractText(await getDocumentProxy(new Uint8Array(bytes)), { mergePages: false });
+    expect(text).toHaveLength(2);
+    expect(text[0]).not.toContain("Monthly Lock");
+    expect(text[1]).toContain("Monthly Lock");
+    expect(text[1]).toContain("450,000");
+  });
+
+  it("repeats the table header on each page a long table continues onto", async () => {
+    const rows = Array.from({ length: 80 }, (_, i) => `| Row ${i} | value ${i} |`).join("\n");
+    const { bytes } = await buildPdf({ content: `| Key | Value |\n|---|---|\n${rows}`, pageSize: "A4" });
+    const { text } = await extractText(await getDocumentProxy(new Uint8Array(bytes)), { mergePages: false });
+    expect(text.length).toBeGreaterThan(1);
+    for (const pageText of text) expect(pageText).toContain("Key");
   });
 
   it("buildPdf counts substitutions directly", async () => {

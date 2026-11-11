@@ -1,0 +1,61 @@
+name: Deploy
+
+# Every push to main is tested, then deployed to the Oracle Cloud VM over SSH.
+# One repository secret is needed (Settings > Secrets and variables > Actions):
+#   DEPLOY_SSH_KEY  a private key whose public half is in the VM's ~/.ssh/authorized_keys
+# The server's address, user, host key and app folder are not secret, so they live below.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# One deploy at a time; a newer push waits for the running one instead of cancelling it mid-build.
+concurrency:
+  group: deploy-oracle
+  cancel-in-progress: false
+
+env:
+  SERVER_IP: 145.241.232.214
+  SERVER_USER: ubuntu
+  # The VM's SSH host key, so the deploy only ever talks to this server. Print it on the VM with:
+  #   echo "$(curl -fsS https://api.ipify.org) $(cut -d' ' -f1,2 /etc/ssh/ssh_host_ed25519_key.pub)"
+  SERVER_HOST_KEY: "145.241.232.214 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBmPWZg2G3V4WRNhglYCMgaVlpedf4PVS1u+xXiRaACX"
+  APP_DIR: ~/Abrahamnavig-claude-tools
+
+jobs:
+  test:
+    uses: ./.github/workflows/ci.yml
+
+  deploy:
+    needs: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: production
+    steps:
+      - name: Set up SSH
+        env:
+          SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+        run: |
+          if [ -z "$SSH_KEY" ]; then
+            echo "::error::Add the DEPLOY_SSH_KEY repository secret (see the README's Automatic deploys section)."
+            exit 1
+          fi
+          if [ -z "$SERVER_HOST_KEY" ]; then
+            echo "::error::Fill in SERVER_HOST_KEY at the top of .github/workflows/deploy.yml."
+            exit 1
+          fi
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          printf '%s\n' "$SERVER_HOST_KEY" > ~/.ssh/known_hosts
+
+      - name: Deploy ${{ github.sha }}
+        env:
+          SHA: ${{ github.sha }}
+        run: |
+          ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=yes -o BatchMode=yes "$SERVER_USER@$SERVER_IP" \
+            "set -e; cd $APP_DIR && git fetch --quiet origin main && git reset --quiet --hard && git checkout --quiet -B main $SHA && bash deploy/update.sh"

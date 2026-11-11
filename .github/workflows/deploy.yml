@@ -23,7 +23,7 @@ env:
   SERVER_USER: ubuntu
   # The VM's SSH host key, so the deploy only ever talks to this server. Print it on the VM with:
   #   echo "$(curl -fsS https://api.ipify.org) $(cut -d' ' -f1,2 /etc/ssh/ssh_host_ed25519_key.pub)"
-  SERVER_HOST_KEY: ""
+  SERVER_HOST_KEY: "145.241.232.214 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBmPWZg2G3V4WRNhglYCMgaVlpedf4PVS1u+xXiRaACX"
   APP_DIR: ~/Abrahamnavig-claude-tools
 
 jobs:

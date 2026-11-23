@@ -40,7 +40,8 @@ EOF
   chmod 600 .env
 fi
 
-# 4. Start
+# 4. Start (the "edge" network is shared with other projects Caddy serves)
+sudo docker network inspect edge >/dev/null 2>&1 || sudo docker network create edge >/dev/null
 sudo docker compose up -d --build
 
 set -a; . ./.env; set +a

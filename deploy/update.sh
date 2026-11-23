@@ -17,6 +17,9 @@ fi
 # fresh login; fall back to sudo until then.
 if docker info >/dev/null 2>&1; then DOCKER=(docker); else DOCKER=(sudo docker); fi
 
+# Shared with other projects' containers that Caddy serves (see deploy/Caddyfile).
+"${DOCKER[@]}" network inspect edge >/dev/null 2>&1 || "${DOCKER[@]}" network create edge >/dev/null
+
 echo "Deploying $(git rev-parse --short HEAD)"
 "${DOCKER[@]}" compose up -d --build --remove-orphans
 

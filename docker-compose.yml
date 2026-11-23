@@ -19,12 +19,20 @@ services:
     ports:
       - "80:80"
       - "443:443"
+    # "default" reaches the app; "edge" reaches other projects' containers on this VM (QoreBills).
+    networks:
+      - default
+      - edge
     environment:
       DOMAIN: ${DOMAIN}
     volumes:
       - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy_data:/data
       - caddy_config:/config
+
+networks:
+  edge:
+    external: true
 
 volumes:
   workspace:

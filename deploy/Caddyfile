@@ -3,3 +3,10 @@
 	encode gzip
 	reverse_proxy app:3000
 }
+
+# QoreBills agent (github.com/16navigabraham/qorebills): its QoreX signing pages.
+# The container joins the shared "edge" network; until it runs, this address answers 502.
+bills.{$DOMAIN} {
+	encode gzip
+	reverse_proxy qorebills:8787
+}
